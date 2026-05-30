@@ -3,3 +3,6 @@
 .DS_Store
 Thumbs.db
 *.log
+
+# Serena runtime state (memories, project.local.yml) — not part of the plugin
+.serena/

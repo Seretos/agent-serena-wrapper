@@ -79,6 +79,9 @@ jobs:
           # payload's icon URL (raw.githubusercontent.com/${repo}/${TAG}/
           # assets/icon.png) resolves.
           [ -d assets ] && cp -a assets "$STAGE/" || true
+          # hooks/ and scripts/ must ship so the PreToolUse hook command resolves.
+          [ -d hooks ]   && cp -a hooks   "$STAGE/" || true
+          [ -d scripts ] && cp -a scripts "$STAGE/" || true
 
           mkdir -p dist
           ZIPNAME="agent-serena-wrapper-${{ inputs.version }}.zip"

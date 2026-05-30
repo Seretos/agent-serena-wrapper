@@ -20,3 +20,23 @@ Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
 ## What the skill teaches
 
 See `skills/serena-wrapper/SKILL.md` for the full content.
+
+## PreToolUse reminder hook
+
+This plugin ships a `hooks/hooks.json` that registers a `PreToolUse` hook
+matching the `Read`, `Glob`, and `Grep` tools. When one of those tools fires,
+the hook script (`scripts/serena-reminder-hook.mjs`) runs automatically.
+
+**What it does:** It injects an `additionalContext` reminder — not a hard
+block — telling the model that Serena MCP semantic tools (`find_symbol`,
+`get_symbol_body`, `find_references`, etc.) are available and preferred for
+code-understanding tasks. The tool call is always allowed through; only the
+reminder text is injected.
+
+**Scoping:** The hook first walks up from the working directory looking for
+`.serena/project.yml`. If the marker is not found, the hook exits silently
+and produces no output (full pass-through). This means the hook is a no-op
+in repos that do not use Serena.
+
+**Codex plugin:** unaffected — Codex uses a separate hook mechanism and its
+`hooks/hooks.json` is independent of this one.
