@@ -1,6 +1,6 @@
 ---
 name: serena-wrapper
-description: Pairs the external Serena MCP server with a skill so Claude works with code through token-efficient semantic operations instead of reading whole files.
+description: Navigate, understand, and edit code with Serena's symbol-aware MCP tools instead of reading or grepping whole files. Use when exploring or understanding an unfamiliar codebase, finding where a function/class/symbol is defined, finding all callers or references of a symbol, reading a single class or method body, tracing inheritance or locating interface implementations, or performing a consistent project-wide rename.
 ---
 
 # serena-wrapper
