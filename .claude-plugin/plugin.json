@@ -1,0 +1,30 @@
+{
+  "name": "agent-serena-wrapper",
+  "description": "Pairs the external Serena MCP server with a skill so Claude works with code through token-efficient semantic operations instead of reading whole files.",
+  "version": "0.0.3",
+  "author": {
+    "name": "Arne von Appen"
+  },
+  "dependencies": [],
+  "mcpServers": {
+    "serena": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "serena-agent",
+        "serena",
+        "start-mcp-server",
+        "--transport",
+        "stdio",
+        "--context",
+        "claude-code",
+        "--project",
+        "${CLAUDE_PROJECT_DIR}",
+        "--enable-web-dashboard",
+        "False",
+        "--enable-gui-log-window",
+        "False"
+      ]
+    }
+  }
+}
