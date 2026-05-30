@@ -25,13 +25,13 @@ Use this skill whenever you need to navigate, understand, or safely modify an un
 
 ## Mental model
 
-Serena models a codebase as a **symbol graph**: files contain classes; classes contain methods and fields; references between symbols are tracked edges. When the MCP server starts with `--project-from-cwd`, it auto-detects the active project by walking up from the current working directory looking for `.serena/project.yml` or `.git`. Once a project is active, every symbol query operates against that graph rather than raw text.
+Serena models a codebase as a **symbol graph**: files contain classes; classes contain methods and fields; references between symbols are tracked edges. When the MCP server starts, it activates the project at startup — the Claude Code variant uses `--project ${CLAUDE_PROJECT_DIR}` (the directory Claude Code is opened on), while the Codex variant uses `--project-from-cwd` (walking up from the process CWD to find `.serena/project.yml` or `.git`). Once a project is active, every symbol query operates against that graph rather than raw text.
 
 Key concepts:
 
 - **Project** — a root directory Serena has indexed. Must be active before any symbol query.
 - **Symbol** — any named code entity: class, function, method, field, variable, module.
-- **Active project** — the project currently loaded into the Serena session. With `--project-from-cwd` this is set automatically at startup; you do not call `activate_project` in normal flow.
+- **Active project** — the project currently loaded into the Serena session. This is set automatically at startup by the launch flags in the plugin manifest; you do not call `activate_project` in normal flow.
 - **Symbol path** — a dotted or slash-delimited path that uniquely identifies a symbol, e.g. `mypackage.mymodule.MyClass.my_method`.
 
 ## Tool inventory
@@ -73,7 +73,7 @@ Use this pattern when a caller holds a reference typed as an interface and you n
 
 ## Pitfalls
 
-- **Do not call `activate_project` manually under normal operation.** The MCP server starts with `--project-from-cwd`, which resolves the project automatically. Calling `activate_project` unnecessarily re-indexes the project and wastes time.
+- **Do not call `activate_project` manually under normal operation.** The MCP server resolves the project automatically at startup via the plugin manifest's launch flags. Calling `activate_project` unnecessarily re-indexes the project and wastes time.
 - **If symbol queries return "no active project"**, the auto-detection failed (e.g. the working directory is outside any indexed repo root). Recover by calling `activate_project` with the absolute path to the repository root, then retry your original query.
 - **Do not mix `Read`-on-file with `get_symbol_body` for the same symbol.** Reading the whole file and then also fetching the symbol body doubles the token cost with no additional information. Pick one approach per symbol.
 - **`search_symbols` is for discovery, not for authoritative lookup.** It may return multiple matches with similar names. Always confirm the exact symbol path with `find_symbol` before passing it to `get_symbol_body` or `find_references`.
