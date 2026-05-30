@@ -8,5 +8,19 @@
   "interface": {
     "displayName": "Agent Serena Wrapper",
     "shortDescription": "Pairs the external Serena MCP server with a skill so Claude works with code through token-efficient semantic operations instead of reading whole files."
+  },
+  "mcpServers": {
+    "serena": {
+      "command": "uvx",
+      "args": [
+        "--from", "serena-agent",
+        "serena", "start-mcp-server",
+        "--transport", "stdio",
+        "--context", "codex",
+        "--project-from-cwd",
+        "--enable-web-dashboard", "False",
+        "--enable-gui-log-window", "False"
+      ]
+    }
   }
 }
