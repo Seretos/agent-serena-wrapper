@@ -18,6 +18,37 @@ jobs:
       - name: Validate plugin.json is valid JSON
         run: jq empty .claude-plugin/plugin.json
 
+      - name: Validate hooks.json is valid JSON
+        run: jq empty hooks/hooks.json
+
+      - name: Validate hook script syntax
+        run: node --check scripts/serena-reminder-hook.mjs
+
+      - name: Test hook script - in-scope repo (expects additionalContext in stdout)
+        run: |
+          TMPDIR_SCOPE=$(mktemp -d)
+          mkdir -p "$TMPDIR_SCOPE/.serena"
+          echo "project: test" > "$TMPDIR_SCOPE/.serena/project.yml"
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_SCOPE"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          echo "Hook output: $OUT"
+          if ! echo "$OUT" | grep -q "additionalContext"; then
+            echo "::error::Expected additionalContext in hook output for in-scope repo"
+            exit 1
+          fi
+          echo "In-scope test: PASS"
+
+      - name: Test hook script - out-of-scope repo (expects empty stdout)
+        run: |
+          TMPDIR_NO_SERENA=$(mktemp -d)
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_NO_SERENA"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          if [ -n "$OUT" ]; then
+            echo "::error::Expected empty stdout for out-of-scope repo, got: $OUT"
+            exit 1
+          fi
+          echo "Out-of-scope test: PASS"
+
       - name: Validate SKILL.md has YAML frontmatter
         run: |
           python3 - <<'EOF'

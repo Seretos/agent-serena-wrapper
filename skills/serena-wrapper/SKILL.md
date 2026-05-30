@@ -1,6 +1,20 @@
 ---
 name: serena-wrapper
-description: Navigate, understand, and edit code with Serena's symbol-aware MCP tools instead of reading or grepping whole files. Use when exploring or understanding an unfamiliar codebase, finding where a function/class/symbol is defined, finding all callers or references of a symbol, reading a single class or method body, tracing inheritance or locating interface implementations, or performing a consistent project-wide rename.
+description: >
+  Navigate, understand, and edit code with Serena's symbol-aware MCP tools
+  instead of reading or grepping whole files. Use when exploring or
+  understanding an unfamiliar codebase, finding where a function/class/symbol
+  is defined, finding all callers or references of a symbol, reading a single
+  class or method body, tracing inheritance or locating interface
+  implementations, or performing a consistent project-wide rename.
+  Also use for questions like: "which providers does the project support",
+  "which options are available", "where is X defined", "where is X
+  implemented", "what does X do", "find all callers of X",
+  "show me all usages of X", "list all implementations of X",
+  "what classes implement interface X", "welche Provider unterstützt das
+  Projekt", "welche Optionen gibt es", "wo wird X definiert",
+  "wo ist X implementiert", "was macht X", "zeig mir alle Aufrufer von X",
+  "zeig mir alle Verwendungen von X", "welche Klassen implementieren X".
 ---
 
 # serena-wrapper
