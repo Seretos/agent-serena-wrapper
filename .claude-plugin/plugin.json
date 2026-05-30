@@ -12,7 +12,7 @@
         "serena", "start-mcp-server",
         "--transport", "stdio",
         "--context", "claude-code",
-        "--project-from-cwd",
+        "--project", "${CLAUDE_PROJECT_DIR}",
         "--enable-web-dashboard", "False",
         "--enable-gui-log-window", "False"
       ]
