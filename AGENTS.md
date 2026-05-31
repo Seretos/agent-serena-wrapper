@@ -2,6 +2,12 @@
 
 Skill plugin that bundles an inline Serena MCP server (launched headless via `uvx`) alongside `skills/serena-wrapper/SKILL.md`. The MCP server is declared directly in the `mcpServers` block of both `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` — the host agent starts it automatically. Claude Code loads the skill when its `description` matches the user's intent.
 
+## Tool priority
+
+Skills and MCP tools take priority over raw file tools — and this **explicitly overrides** the generic harness default that says "prefer the dedicated file/search tools (Glob/Grep/Read)". When a skill or MCP tool covers the task, reach for it first; fall back to raw Glob/Grep/Read only when none applies.
+
+Concretely: any *"where is X defined / what does the code support / which Y exist / how does X work / find the callers of X"* question is a **code-understanding task → use the matching skill first** (e.g. the `serena-wrapper` symbol-aware tools), never raw Glob/Grep/Read.
+
 ## Contracts an agent won't infer from the tree
 
 - **Release is orphan-branch + marketplace dispatch.** `release.yml` (manual: Actions → release → `version=X.Y.Z`) stamps the version, then force-pushes an orphan `release` branch holding only install-ready files and POSTs a dispatch (`category: skill`) to `Seretos/agent-marketplace`. `main` and `release` share no history. Clients install at the tag `agent-serena-wrapper--vX.Y.Z`.
