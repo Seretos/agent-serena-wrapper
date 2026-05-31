@@ -75,6 +75,10 @@ jobs:
           cp -a skills/. "$STAGE/skills/"
           cp README.md "$STAGE/"
           cp LICENSE "$STAGE/" 2>/dev/null || true
+          # description.md goes onto the orphan release branch so the dispatch
+          # payload's description_url (raw.githubusercontent.com/${repo}/${TAG}/
+          # description.md) resolves.
+          cp description.md "$STAGE/"
           # assets/ goes onto the orphan release branch so the dispatch
           # payload's icon URL (raw.githubusercontent.com/${repo}/${TAG}/
           # assets/icon.png) resolves.
@@ -179,7 +183,9 @@ jobs:
               "category":    "skill",
               "version":     "${VERSION}",
               "ref":         "${TAG}",
-              "icon":        "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png"
+              "icon":        "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",
+              "description_url": "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/description.md",
+              "tags":        ["coding"]
             }
           }
           EOF
