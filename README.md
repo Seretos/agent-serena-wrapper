@@ -6,7 +6,7 @@ This plugin bundles a headless Serena MCP server declared inline in both plugin 
 
 ## Prerequisites
 
-`uv` must be installed on the host machine. `uvx` (bundled with `uv`) is used to launch Serena on demand without a manual `pip install`.
+`uv` must be installed on the host machine. `uvx` (bundled with `uv`) is used to launch Serena on demand without a manual `pip install`. Serena is pinned to an exact version (`serena-agent==1.5.3`) in both manifests so `uvx` resolves the same cached environment on every start instead of re-checking the index for a newer release.
 
 Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
 
@@ -20,6 +20,38 @@ Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
 ## What the skill teaches
 
 See `skills/serena-wrapper/SKILL.md` for the full content.
+
+## Troubleshooting
+
+### "Serena MCP server not loaded" on startup
+
+Occasionally the host reports that the Serena MCP server failed to load right
+after launch, and a simple **reconnect** (`/mcp` → reconnect, or reloading the
+plugin) fixes it immediately.
+
+**Cause.** Serena is started headless via `uvx`, which builds/validates its
+cached environment *before* Serena emits its first JSON-RPC byte. On a cold
+start — first install, an empty/`uvx` cache, or first-time package download —
+that setup can exceed the host's fixed stdio handshake timeout, so the host
+gives up and marks the server as not loaded. A reconnect succeeds because by
+then the environment is already built and the server starts instantly. This is
+a startup-timing race, not a misconfiguration.
+
+**What this plugin does.** Serena is pinned to an exact version
+(`serena-agent==1.5.3`) in both manifests. An exact pin lets `uvx` reuse the
+same cached tool environment on every start instead of querying the index for a
+newer release, which removes the per-start resolution overhead and makes the
+race far less likely once the environment is cached.
+
+**The first cold start is unavoidable.** The very first launch with no cache
+must still download and build the environment, which can be slow enough to trip
+the timeout. If you see the error there, just **reconnect the MCP server** — it
+will start cleanly because the environment is now cached. To warm the cache
+ahead of time you can pre-run:
+
+```
+uvx --from serena-agent==1.5.3 serena --help
+```
 
 ## PreToolUse reminder hook
 

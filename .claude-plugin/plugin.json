@@ -8,7 +8,7 @@
     "serena": {
       "command": "uvx",
       "args": [
-        "--from", "serena-agent",
+        "--from", "serena-agent==1.5.3",
         "serena", "start-mcp-server",
         "--transport", "stdio",
         "--context", "claude-code",
