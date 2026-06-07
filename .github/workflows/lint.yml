@@ -24,16 +24,20 @@ jobs:
       - name: Validate hook script syntax
         run: node --check scripts/serena-reminder-hook.mjs
 
-      - name: Test hook script - in-scope repo (expects additionalContext in stdout)
+      - name: Test hook script - in-scope repo (expects additionalContext, no warning)
         run: |
           TMPDIR_SCOPE=$(mktemp -d)
           mkdir -p "$TMPDIR_SCOPE/.serena"
-          echo "project: test" > "$TMPDIR_SCOPE/.serena/project.yml"
+          printf 'project: test\nlanguages:\n- yaml\n' > "$TMPDIR_SCOPE/.serena/project.yml"
           OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_SCOPE"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           echo "Hook output: $OUT"
           if ! echo "$OUT" | grep -q "additionalContext"; then
             echo "::error::Expected additionalContext in hook output for in-scope repo"
+            exit 1
+          fi
+          if echo "$OUT" | grep -q "Warning:"; then
+            echo "::error::Unexpected Warning in fast-path hook output (languages already set)"
             exit 1
           fi
           echo "In-scope test: PASS"
@@ -48,6 +52,155 @@ jobs:
             exit 1
           fi
           echo "Out-of-scope test: PASS"
+
+      - name: Test hook script - empty languages patched when source file present (regression)
+        run: |
+          TMPDIR_PATCH=$(mktemp -d)
+          mkdir -p "$TMPDIR_PATCH/.serena"
+          printf 'project: test\nlanguages:\n' > "$TMPDIR_PATCH/.serena/project.yml"
+          touch "$TMPDIR_PATCH/index.ts"
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_PATCH"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          echo "Hook output: $OUT"
+          CONTENT=$(cat "$TMPDIR_PATCH/.serena/project.yml")
+          echo "project.yml after: $CONTENT"
+          if ! echo "$CONTENT" | grep -q "typescript"; then
+            echo "::error::Expected 'typescript' patched into project.yml"
+            exit 1
+          fi
+          echo "Regression test (empty languages patched): PASS"
+
+      - name: Test hook script - languages at EOF (no trailing newline) gets patched
+        run: |
+          TMPDIR_EOF=$(mktemp -d)
+          mkdir -p "$TMPDIR_EOF/.serena"
+          # Write `languages:` at end of file with no trailing newline
+          printf 'project: test\nlanguages:' > "$TMPDIR_EOF/.serena/project.yml"
+          touch "$TMPDIR_EOF/index.ts"
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_EOF"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          echo "Hook output: $OUT"
+          CONTENT=$(cat "$TMPDIR_EOF/.serena/project.yml")
+          echo "project.yml after: $CONTENT"
+          if ! echo "$CONTENT" | grep -q "typescript"; then
+            echo "::error::Expected 'typescript' patched into project.yml (no-newline case)"
+            exit 1
+          fi
+          echo "No-trailing-newline patch test: PASS"
+
+      - name: Test hook script - fast path when languages already populated
+        run: |
+          TMPDIR_FAST=$(mktemp -d)
+          mkdir -p "$TMPDIR_FAST/.serena"
+          printf 'project: test\nlanguages:\n- python\n' > "$TMPDIR_FAST/.serena/project.yml"
+          touch "$TMPDIR_FAST/main.py"
+          BEFORE=$(cat "$TMPDIR_FAST/.serena/project.yml")
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_FAST"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          AFTER=$(cat "$TMPDIR_FAST/.serena/project.yml")
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "::error::project.yml should not be rewritten when languages already set"
+            echo "Before: $BEFORE"
+            echo "After: $AFTER"
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q "additionalContext"; then
+            echo "::error::Expected additionalContext in fast-path output"
+            exit 1
+          fi
+          echo "Fast-path test: PASS"
+
+      - name: Test hook script - subdirectory detection (src/ only)
+        run: |
+          TMPDIR_SUBDIR=$(mktemp -d)
+          mkdir -p "$TMPDIR_SUBDIR/.serena"
+          mkdir -p "$TMPDIR_SUBDIR/src"
+          printf 'project: test\nlanguages:\n' > "$TMPDIR_SUBDIR/.serena/project.yml"
+          touch "$TMPDIR_SUBDIR/src/main.go"
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_SUBDIR"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          CONTENT=$(cat "$TMPDIR_SUBDIR/.serena/project.yml")
+          echo "project.yml after: $CONTENT"
+          if ! echo "$CONTENT" | grep -q "go"; then
+            echo "::error::Expected 'go' detected from src/main.go and patched"
+            exit 1
+          fi
+          echo "Subdirectory detection test: PASS"
+
+      - name: Test hook script - multiple extensions (source lang sorted before config lang)
+        run: |
+          TMPDIR_MULTI=$(mktemp -d)
+          mkdir -p "$TMPDIR_MULTI/.serena"
+          printf 'project: test\nlanguages:\n' > "$TMPDIR_MULTI/.serena/project.yml"
+          touch "$TMPDIR_MULTI/app.ts"
+          touch "$TMPDIR_MULTI/data.json"
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_MULTI"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          CONTENT=$(cat "$TMPDIR_MULTI/.serena/project.yml")
+          echo "project.yml after: $CONTENT"
+          if ! echo "$CONTENT" | grep -q "typescript"; then
+            echo "::error::Expected 'typescript' in patched project.yml"
+            exit 1
+          fi
+          if ! echo "$CONTENT" | grep -q "json"; then
+            echo "::error::Expected 'json' in patched project.yml"
+            exit 1
+          fi
+          # The first entry after `languages:` must be a source language (typescript),
+          # not the config language (json) — sortLanguages guarantees this regardless
+          # of readdir order.
+          FIRST_ENTRY=$(grep -A1 '^languages:' "$TMPDIR_MULTI/.serena/project.yml" \
+                        | grep '^- ' | head -1)
+          if [ "$FIRST_ENTRY" != "- typescript" ]; then
+            echo "::error::Expected first languages entry to be 'typescript', got: $FIRST_ENTRY"
+            exit 1
+          fi
+          echo "Multiple extensions test (source language first): PASS"
+
+      - name: Test hook script - truly empty dir emits warning, no patch
+        run: |
+          TMPDIR_EMPTY=$(mktemp -d)
+          mkdir -p "$TMPDIR_EMPTY/.serena"
+          printf 'project: test\nlanguages:\n' > "$TMPDIR_EMPTY/.serena/project.yml"
+          BEFORE=$(cat "$TMPDIR_EMPTY/.serena/project.yml")
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_EMPTY"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          echo "Hook output: $OUT"
+          AFTER=$(cat "$TMPDIR_EMPTY/.serena/project.yml")
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "::error::project.yml should not be rewritten for truly empty dir"
+            echo "Before: $BEFORE"
+            echo "After: $AFTER"
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q "languages"; then
+            echo "::error::Expected warning containing 'languages' in output for empty dir"
+            exit 1
+          fi
+          echo "Empty dir warning test: PASS"
+
+      - name: Test hook script - unmapped extension only emits warning, no patch
+        run: |
+          TMPDIR_XYZ=$(mktemp -d)
+          mkdir -p "$TMPDIR_XYZ/.serena"
+          printf 'project: test\nlanguages:\n' > "$TMPDIR_XYZ/.serena/project.yml"
+          touch "$TMPDIR_XYZ/data.xyz"
+          BEFORE=$(cat "$TMPDIR_XYZ/.serena/project.yml")
+          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_XYZ"'"}' \
+                | node scripts/serena-reminder-hook.mjs)
+          echo "Hook output: $OUT"
+          AFTER=$(cat "$TMPDIR_XYZ/.serena/project.yml")
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "::error::project.yml should not be rewritten for unmapped extension"
+            echo "Before: $BEFORE"
+            echo "After: $AFTER"
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q "languages"; then
+            echo "::error::Expected warning containing 'languages' in output for unmapped ext"
+            exit 1
+          fi
+          echo "Unmapped extension warning test: PASS"
 
       - name: Validate SKILL.md has YAML frontmatter
         run: |
