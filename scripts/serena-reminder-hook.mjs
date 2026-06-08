@@ -12,11 +12,16 @@
  * symbol tools become active without manual editing. If no language can be
  * detected a targeted warning is injected into additionalContext instead of
  * failing silently.
+ *
+ * If .serena/project.yml has a corrupted `languages:` block (e.g. duplicate
+ * entries caused by orphaned lines separated by blank lines), the hook
+ * deduplicates and rewrites the block to a clean canonical form.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 const MARKER = path.join(".serena", "project.yml");
 
@@ -104,8 +109,14 @@ function isSerenaActive(startDir) {
 
 /**
  * Reads the `languages:` block from a project.yml file via regex.
- * Returns an array of language strings already configured, or `[]` if the
- * block is present but empty, absent, or the file cannot be read.
+ * Returns an array of language strings already configured (with duplicates
+ * preserved so callers can detect corruption), or `[]` if the block is
+ * present but empty, absent, or the file cannot be read.
+ *
+ * The regex greedily consumes every line that is either a `- entry` line or a
+ * blank/whitespace-only line, stopping at the first real non-blank, non-dash
+ * YAML key. This correctly handles interleaved blank lines and orphaned
+ * duplicate entries that the old narrow regex would silently truncate.
  *
  * Handles `languages:` both mid-file (followed by \n) and at EOF (no trailing
  * newline).
@@ -117,15 +128,18 @@ function readLanguages(projectYmlPath) {
   } catch {
     return [];
   }
-  // Match `languages:` optionally followed by a newline and zero or more
-  // `- entry\n` lines. The `(?:\n|$)` allows the key to sit at EOF.
-  const m = text.match(/^languages:(?:\n((?:- .*\n)*))?/m);
+  // Match `languages:` followed by zero or more lines that are either
+  // `- entry` lines or blank/whitespace-only lines (handles interleaved blanks
+  // and orphaned duplicate entries). Stops at the first non-blank, non-dash
+  // line (the next real YAML key). Also handles `languages:` at EOF.
+  const m = text.match(/^languages:[ \t]*\n((?:(?:- [^\n]*|[ \t\r]*)\n)*)/m);
   if (!m) {
     return [];
   }
-  const block = m[1] || "";
-  const entries = block
+  // Filter to only actual `- entry` lines; ignore blank/whitespace-only lines.
+  const entries = m[1]
     .split("\n")
+    .filter((l) => /^- /.test(l))
     .map((l) => l.replace(/^- /, "").trim())
     .filter(Boolean);
   return entries;
@@ -220,6 +234,11 @@ function sortLanguages(languageSet) {
  * preserving all comments and other fields. Uses write-to-temp-then-rename
  * for atomicity. Swallows any write error — the hook must never block a call.
  *
+ * The regex greedily consumes the entire existing block including interleaved
+ * blank lines and orphaned duplicate entries, stopping at the first real YAML
+ * key. This ensures corrupted blocks (e.g. blank-line-separated duplicates)
+ * are fully replaced rather than partially overwritten.
+ *
  * Handles `languages:` both mid-file (followed by \n) and at EOF (no trailing
  * newline), as well as an already-populated list.
  */
@@ -235,13 +254,18 @@ function patchLanguages(projectYmlPath, languages) {
     "languages:\n" + languages.map((l) => `- ${l}\n`).join("");
 
   // Replace the existing languages block including any current entries.
-  // The pattern matches:
-  //   - `languages:` optionally followed by a newline and zero or more entry lines, OR
-  //   - `languages:` at EOF (no newline).
-  const patched = text.replace(
-    /^languages:(?:\n(?:- .*\n)*)?/m,
+  // The pattern greedily consumes every line that is either a `- entry` line
+  // or a blank/whitespace-only line, stopping at the first real YAML key.
+  // This handles interleaved blank lines and orphaned duplicate entries.
+  let patched = text.replace(
+    /^languages:[ \t]*\n(?:(?:- [^\n]*|[ \t\r]*)\n)*/m,
     newBlock
   );
+  // Fallback: `languages:` at EOF with no trailing newline.
+  // Replace the bare key; newBlock already ends with \n which is valid YAML.
+  if (patched === text) {
+    patched = text.replace(/^languages:[ \t]*$/m, newBlock);
+  }
 
   if (patched === text) {
     // Nothing changed (block not found or no-op) — skip write.
@@ -293,7 +317,17 @@ function main() {
   let additionalContext = REMINDER;
 
   const existingLanguages = readLanguages(projectYmlPath);
-  if (existingLanguages.length === 0) {
+
+  // Dedup check: if the block contains duplicate entries (corruption from
+  // orphaned lines), normalise it immediately so Serena receives a clean list.
+  const uniqueLanguages = [...new Set(existingLanguages)];
+  if (
+    existingLanguages.length > 0 &&
+    uniqueLanguages.length !== existingLanguages.length
+  ) {
+    patchLanguages(projectYmlPath, uniqueLanguages);
+    // REMINDER is sufficient — languages are now configured and cleaned.
+  } else if (existingLanguages.length === 0) {
     // Languages not yet configured — attempt auto-detection.
     const detected = detectLanguages(repoRoot);
     if (detected.length > 0) {
@@ -304,7 +338,7 @@ function main() {
       additionalContext = REMINDER + NO_LANGUAGE_WARNING;
     }
   }
-  // If existingLanguages.length > 0 — fast path: emit normal REMINDER only.
+  // If existingLanguages.length > 0 and no duplicates — fast path: emit normal REMINDER only.
 
   // Emit the PreToolUse hook output — non-blocking allow + reminder context.
   const output = {
@@ -319,12 +353,23 @@ function main() {
   process.exit(0);
 }
 
-try {
-  main();
-} catch (err) {
-  // Never block the tool call due to an unexpected error.
-  process.stderr.write(
-    `serena-reminder-hook: unexpected error: ${err instanceof Error ? err.message : String(err)}\n`
-  );
-  process.exit(0);
+// Export internal functions for testing. Guard main() so importing this module
+// as an ES module does not run the hook.
+export { readLanguages, patchLanguages, detectLanguages, sortLanguages };
+
+// Only run main() when this file is executed directly (not imported).
+const isMain =
+  typeof process.argv[1] === "string" &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (isMain) {
+  try {
+    main();
+  } catch (err) {
+    // Never block the tool call due to an unexpected error.
+    process.stderr.write(
+      `serena-reminder-hook: unexpected error: ${err instanceof Error ? err.message : String(err)}\n`
+    );
+    process.exit(0);
+  }
 }
