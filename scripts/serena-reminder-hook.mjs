@@ -108,15 +108,17 @@ function isSerenaActive(startDir) {
 }
 
 /**
- * Reads the `languages:` block from a project.yml file via regex.
- * Returns an array of language strings already configured (with duplicates
- * preserved so callers can detect corruption), or `[]` if the block is
- * present but empty, absent, or the file cannot be read.
+ * Reads the `languages:` block from a project.yml file using line-based
+ * scanning. Returns an array of language strings already configured (with
+ * duplicates preserved so callers can detect corruption), or `[]` if the
+ * block is present but empty, absent, or the file cannot be read.
  *
- * The regex greedily consumes every line that is either a `- entry` line or a
- * blank/whitespace-only line, stopping at the first real non-blank, non-dash
- * YAML key. This correctly handles interleaved blank lines and orphaned
- * duplicate entries that the old narrow regex would silently truncate.
+ * Block extent: starting at the `languages:` line, the block consists of all
+ * following lines up to — but not including — the next line that is a real
+ * column-0 YAML key (`/^[a-zA-Z_][a-zA-Z0-9_]*:/`) or EOF. Comment lines
+ * (`/^\s*#/`, at column 0 OR indented) and blank/whitespace-only lines do NOT
+ * terminate the block; they are part of it. This lets column-0 comments
+ * between entries be skipped without truncating the block.
  *
  * Handles `languages:` both mid-file (followed by \n) and at EOF (no trailing
  * newline).
@@ -128,20 +130,78 @@ function readLanguages(projectYmlPath) {
   } catch {
     return [];
   }
-  // Match `languages:` followed by zero or more lines that are either
-  // `- entry` lines or blank/whitespace-only lines (handles interleaved blanks
-  // and orphaned duplicate entries). Stops at the first non-blank, non-dash
-  // line (the next real YAML key). Also handles `languages:` at EOF.
-  const m = text.match(/^languages:[ \t]*\n((?:(?:- [^\n]*|[ \t\r]*)\n)*)/m);
-  if (!m) {
+
+  // --- Inline flow form: `languages: []` or `languages: [a, b, c]` ---
+  // Must be tried before the block-style logic to avoid false matches.
+  const inlineMatch = text.match(/^languages:\s*\[([^\]]*)\]/m);
+  if (inlineMatch) {
+    const entries = inlineMatch[1]
+      .split(",")
+      .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+      .filter(Boolean);
+    return entries;
+  }
+
+  // --- Block-style: line-based scanning ---
+  // Split into lines (preserve \r so CRLF files are handled — \r is treated as
+  // whitespace in blank-line detection, not as a key character).
+  const allLines = text.split("\n");
+
+  // Find the `languages:` line.
+  let langLineIdx = -1;
+  for (let i = 0; i < allLines.length; i++) {
+    if (/^languages:[ \t]*(\r)?$/.test(allLines[i])) {
+      langLineIdx = i;
+      break;
+    }
+  }
+  if (langLineIdx === -1) {
     return [];
   }
-  // Filter to only actual `- entry` lines; ignore blank/whitespace-only lines.
-  const entries = m[1]
-    .split("\n")
+
+  // Collect all block body lines: lines after `languages:` that are NOT a
+  // real column-0 YAML key. Comment lines and blank lines stay inside.
+  const blockLines = [];
+  for (let i = langLineIdx + 1; i < allLines.length; i++) {
+    const line = allLines[i];
+    // A real column-0 YAML key terminates the block.
+    if (/^[a-zA-Z_][a-zA-Z0-9_]*:/.test(line)) {
+      break;
+    }
+    blockLines.push(line);
+  }
+
+  // Check for orphan/foreign lines: lines that are neither `- entry`, nor
+  // blank/whitespace-only, nor a comment. These indicate a corrupted block.
+  let corrupted = false;
+  for (const line of blockLines) {
+    if (line === "") continue; // trailing empty after final \n split
+    if (/^- /.test(line)) continue; // valid entry
+    if (/^[ \t\r]*$/.test(line)) continue; // blank / whitespace-only
+    if (/^\s*#/.test(line)) continue; // comment (column-0 or indented) — not corruption
+    // Anything else is a foreign/orphan line (e.g. ` []`).
+    corrupted = true;
+    break;
+  }
+
+  // Filter to only actual `- entry` lines; ignore blank/whitespace-only lines
+  // and comment lines. Strip inline comments (# ...) before trimming so
+  // `- python  # backend` yields `python`, not `python  # backend`.
+  const entries = blockLines
     .filter((l) => /^- /.test(l))
-    .map((l) => l.replace(/^- /, "").trim())
+    .map((l) => l.replace(/^- /, "").replace(/#.*$/, "").trim().replace(/^["']|["']$/g, ""))
     .filter(Boolean);
+
+  if (corrupted) {
+    // Mark the array as corrupted without affecting length or JSON serialisation.
+    Object.defineProperty(entries, "_corrupted", {
+      value: true,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  }
+
   return entries;
 }
 
@@ -230,14 +290,28 @@ function sortLanguages(languageSet) {
 }
 
 /**
- * Rewrites the `languages:` block in project.yml using string replacement,
+ * Returns true when an entry is a valid Serena language key.
+ * Valid keys are lowercase ASCII identifiers: start with a letter, then
+ * letters / digits / underscores only — no spaces, brackets, or punctuation.
+ * This catches corrupt scalars like `markdown []` (contains a space).
+ */
+function isValidLanguageEntry(entry) {
+  return /^[a-z][a-z0-9_]*$/.test(entry);
+}
+
+/**
+ * Rewrites the `languages:` block in project.yml using line-based scanning,
  * preserving all comments and other fields. Uses write-to-temp-then-rename
  * for atomicity. Swallows any write error — the hook must never block a call.
  *
- * The regex greedily consumes the entire existing block including interleaved
- * blank lines and orphaned duplicate entries, stopping at the first real YAML
- * key. This ensures corrupted blocks (e.g. blank-line-separated duplicates)
- * are fully replaced rather than partially overwritten.
+ * The replaced span runs from the `languages:` line through the last entry or
+ * orphan line of the block, EXCLUDING any trailing comment/blank lines that
+ * come after the last entry. This ensures that a trailing `# the encoding`
+ * comment is never consumed and survives the rewrite unchanged.
+ *
+ * Block extent (same as readLanguages): lines after `languages:` that are not
+ * a real column-0 YAML key. Comment lines and blank/whitespace-only lines do
+ * NOT terminate the block; they are part of it.
  *
  * Handles `languages:` both mid-file (followed by \n) and at EOF (no trailing
  * newline), as well as an already-populated list.
@@ -253,15 +327,69 @@ function patchLanguages(projectYmlPath, languages) {
   const newBlock =
     "languages:\n" + languages.map((l) => `- ${l}\n`).join("");
 
-  // Replace the existing languages block including any current entries.
-  // The pattern greedily consumes every line that is either a `- entry` line
-  // or a blank/whitespace-only line, stopping at the first real YAML key.
-  // This handles interleaved blank lines and orphaned duplicate entries.
-  let patched = text.replace(
-    /^languages:[ \t]*\n(?:(?:- [^\n]*|[ \t\r]*)\n)*/m,
-    newBlock
-  );
-  // Fallback: `languages:` at EOF with no trailing newline.
+  // Pass 1: inline flow form — `languages: []` or `languages: [a, b, c]`.
+  // Convert to canonical block form so `[]` residue is fully eliminated.
+  let patched = text.replace(/^languages:\s*\[[^\]]*\]/m, newBlock);
+
+  // Pass 2: block-style form — line-based scanning.
+  if (patched === text) {
+    const allLines = text.split("\n");
+
+    // Find the `languages:` line index.
+    let langLineIdx = -1;
+    for (let i = 0; i < allLines.length; i++) {
+      if (/^languages:[ \t]*(\r)?$/.test(allLines[i])) {
+        langLineIdx = i;
+        break;
+      }
+    }
+
+    if (langLineIdx !== -1) {
+      // Find the end of the block: first line that is a real column-0 YAML key.
+      let blockEndIdx = allLines.length; // exclusive end of block body
+      for (let i = langLineIdx + 1; i < allLines.length; i++) {
+        if (/^[a-zA-Z_][a-zA-Z0-9_]*:/.test(allLines[i])) {
+          blockEndIdx = i;
+          break;
+        }
+      }
+
+      // Walk back from blockEndIdx to find the last non-trailing-comment line.
+      // Only trailing COMMENT lines are excluded from the replacement span so
+      // they survive the rewrite (e.g. `# the encoding` after the last entry).
+      // Blank/whitespace-only lines are included in the span and consumed —
+      // this removes stale blank separators from corrupted blocks and avoids
+      // stray \r characters from CRLF blank lines leaking into the output.
+      let lastEntryIdx = langLineIdx; // default: no body lines → replace only the key line
+      for (let i = blockEndIdx - 1; i > langLineIdx; i--) {
+        const line = allLines[i];
+        // Skip trailing comment-only lines (exclude them from the span).
+        if (/^\s*#/.test(line)) {
+          continue;
+        }
+        // Blank lines and all other lines stop the walk-back and are included.
+        lastEntryIdx = i;
+        break;
+      }
+
+      // Reconstruct: beforeParts + newBlock + afterParts.
+      // split("\n") / join("\n") are exact inverses of each other, so:
+      //   allLines.join("\n") === text
+      // We replace allLines[langLineIdx..lastEntryIdx] with newBlock (which
+      // already ends with "\n"). The separator between beforeParts and newBlock
+      // is supplied explicitly; no separator needed between newBlock and
+      // afterParts because newBlock's trailing "\n" plays that role.
+      const beforeParts = allLines.slice(0, langLineIdx);
+      const afterParts  = allLines.slice(lastEntryIdx + 1);
+
+      patched =
+        (beforeParts.length > 0 ? beforeParts.join("\n") + "\n" : "") +
+        newBlock +
+        afterParts.join("\n");
+    }
+  }
+
+  // Pass 3 (fallback): `languages:` at EOF with no trailing newline.
   // Replace the bare key; newBlock already ends with \n which is valid YAML.
   if (patched === text) {
     patched = text.replace(/^languages:[ \t]*$/m, newBlock);
@@ -318,15 +446,33 @@ function main() {
 
   const existingLanguages = readLanguages(projectYmlPath);
 
-  // Dedup check: if the block contains duplicate entries (corruption from
-  // orphaned lines), normalise it immediately so Serena receives a clean list.
+  // Widen the heal condition: trigger a rewrite whenever the block is
+  // corrupted (orphan lines detected by readLanguages), contains duplicates,
+  // or contains invalid scalars (e.g. `markdown []` from Serena folding a
+  // corrupt inline form into the block key).
   const uniqueLanguages = [...new Set(existingLanguages)];
-  if (
-    existingLanguages.length > 0 &&
-    uniqueLanguages.length !== existingLanguages.length
-  ) {
-    patchLanguages(projectYmlPath, uniqueLanguages);
-    // REMINDER is sufficient — languages are now configured and cleaned.
+  const hasInvalidEntries = uniqueLanguages.some(
+    (e) => !isValidLanguageEntry(e)
+  );
+  const isDuplicated = uniqueLanguages.length !== existingLanguages.length;
+  const isCorrupted = existingLanguages._corrupted === true;
+
+  if (existingLanguages.length > 0 && (isDuplicated || isCorrupted || hasInvalidEntries)) {
+    // Heal: strip invalid scalars, keep only valid unique language keys.
+    const cleanLanguages = uniqueLanguages.filter(isValidLanguageEntry);
+    if (cleanLanguages.length > 0) {
+      patchLanguages(projectYmlPath, cleanLanguages);
+      // REMINDER is sufficient — languages are now configured and cleaned.
+    } else {
+      // All entries were invalid — fall back to auto-detection.
+      const detected = detectLanguages(repoRoot);
+      if (detected.length > 0) {
+        patchLanguages(projectYmlPath, detected);
+        // REMINDER is sufficient — languages are now configured.
+      } else {
+        additionalContext = REMINDER + NO_LANGUAGE_WARNING;
+      }
+    }
   } else if (existingLanguages.length === 0) {
     // Languages not yet configured — attempt auto-detection.
     const detected = detectLanguages(repoRoot);
@@ -338,7 +484,7 @@ function main() {
       additionalContext = REMINDER + NO_LANGUAGE_WARNING;
     }
   }
-  // If existingLanguages.length > 0 and no duplicates — fast path: emit normal REMINDER only.
+  // If existingLanguages.length > 0 and no corruption/duplicates/invalid — fast path: emit normal REMINDER only.
 
   // Emit the PreToolUse hook output — non-blocking allow + reminder context.
   const output = {
@@ -355,7 +501,7 @@ function main() {
 
 // Export internal functions for testing. Guard main() so importing this module
 // as an ES module does not run the hook.
-export { readLanguages, patchLanguages, detectLanguages, sortLanguages };
+export { readLanguages, patchLanguages, detectLanguages, sortLanguages, isValidLanguageEntry };
 
 // Only run main() when this file is executed directly (not imported).
 const isMain =
