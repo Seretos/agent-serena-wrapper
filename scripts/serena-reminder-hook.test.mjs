@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { readLanguages, patchLanguages } from "./serena-reminder-hook.mjs";
+import { readLanguages, patchLanguages, isValidLanguageEntry } from "./serena-reminder-hook.mjs";
 
 // ---------------------------------------------------------------------------
 // Minimal test harness
@@ -360,6 +360,383 @@ test("CRLF: patchLanguages on mixed LF/CRLF file produces clean LF-only language
   const cleaned = readLanguages(ymlPath);
   assertEqual(cleaned, ["typescript", "markdown", "json"],
     "readLanguages after patch returns clean 3-entry list");
+});
+
+// ---------------------------------------------------------------------------
+// Inline flow-syntax tests (ticket #16 bug 1)
+// ---------------------------------------------------------------------------
+
+test("readLanguages: inline empty — languages: [] returns []", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: []\n` +
+    `encoding: "utf-8"\n`
+  );
+  assertEqual(readLanguages(ymlPath), [], "inline empty list");
+});
+
+test("readLanguages: inline single entry — languages: [typescript] returns [\"typescript\"]", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: [typescript]\n` +
+    `encoding: "utf-8"\n`
+  );
+  assertEqual(readLanguages(ymlPath), ["typescript"], "inline single entry");
+});
+
+test("readLanguages: inline multi-entry — languages: [a, b, c] returns [\"a\",\"b\",\"c\"]", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: [a, b, c]\n` +
+    `encoding: "utf-8"\n`
+  );
+  assertEqual(readLanguages(ymlPath), ["a", "b", "c"], "inline multi-entry");
+});
+
+test("readLanguages: inline whitespace — languages: [ ] returns []", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: [ ]\n` +
+    `encoding: "utf-8"\n`
+  );
+  assertEqual(readLanguages(ymlPath), [], "inline whitespace-only brackets");
+});
+
+test("patchLanguages: inline empty — languages: [] is replaced with block form", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: []\n` +
+    `encoding: "utf-8"\n`
+  );
+  patchLanguages(ymlPath, ["python"]);
+  const content = readRaw(ymlPath);
+  assert(content.includes("languages:\n- python\n"), "block form written");
+  assert(!content.includes("languages: []"), "no inline form residue");
+  assert(content.includes('encoding: "utf-8"'), "next key preserved");
+});
+
+test("patchLanguages: inline filled — languages: [typescript] is replaced with block form", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: [typescript]\n` +
+    `encoding: "utf-8"\n`
+  );
+  patchLanguages(ymlPath, ["python"]);
+  const content = readRaw(ymlPath);
+  assert(content.includes("languages:\n- python\n"), "new entry written as block");
+  assert(!content.includes("[typescript]"), "old inline form removed");
+  assert(content.includes('encoding: "utf-8"'), "next key preserved");
+});
+
+// ---------------------------------------------------------------------------
+// Corrupted block with orphan ` []` line (ticket #16 bug 2)
+// ---------------------------------------------------------------------------
+
+test("readLanguages: corrupted block with orphan ` []` line — returns entries with _corrupted flag", () => {
+  // Simulate `languages:\n- markdown\n []\n` — the Serena folded form.
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- markdown\n` +
+    ` []\n` +
+    `encoding: "utf-8"\n`
+  );
+  const langs = readLanguages(ymlPath);
+  assertEqual(langs, ["markdown"], "entries returned correctly");
+  assert(langs._corrupted === true, "_corrupted flag set");
+  // Non-enumerable: should not appear in JSON.stringify
+  assert(!JSON.stringify(langs).includes("_corrupted"), "_corrupted not enumerable");
+});
+
+test("patchLanguages: corrupted block with orphan ` []` — orphan line fully replaced", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- markdown\n` +
+    ` []\n` +
+    `encoding: "utf-8"\n`
+  );
+  patchLanguages(ymlPath, ["markdown"]);
+  const content = readRaw(ymlPath);
+  assert(content.includes("languages:\n- markdown\n"), "clean block written");
+  assert(!content.includes(" []"), "orphan [] line removed");
+  assert(!content.includes("markdown []"), "no merged invalid scalar");
+  assert(content.includes('encoding: "utf-8"'), "next key preserved");
+  // Verify re-parse is clean.
+  const cleaned = readLanguages(ymlPath);
+  assertEqual(cleaned, ["markdown"], "re-parse returns clean list");
+  assert(cleaned._corrupted !== true, "no _corrupted flag after clean patch");
+});
+
+// ---------------------------------------------------------------------------
+// isValidLanguageEntry helper
+// ---------------------------------------------------------------------------
+
+test("isValidLanguageEntry: valid keys return true", () => {
+  assert(isValidLanguageEntry("typescript"), "typescript is valid");
+  assert(isValidLanguageEntry("python"), "python is valid");
+  assert(isValidLanguageEntry("go"), "go is valid");
+  assert(isValidLanguageEntry("cpp"), "cpp is valid");
+  assert(isValidLanguageEntry("csharp"), "csharp is valid");
+  assert(isValidLanguageEntry("markdown"), "markdown is valid");
+  assert(isValidLanguageEntry("json"), "json is valid");
+  assert(isValidLanguageEntry("yaml"), "yaml is valid");
+  assert(isValidLanguageEntry("toml"), "toml is valid");
+});
+
+test("isValidLanguageEntry: invalid entries return false", () => {
+  assert(!isValidLanguageEntry("markdown []"), "space+brackets is invalid");
+  assert(!isValidLanguageEntry(" []"), "bare orphan line is invalid");
+  assert(!isValidLanguageEntry(""), "empty string is invalid");
+  assert(!isValidLanguageEntry("TypeScript"), "uppercase is invalid");
+  assert(!isValidLanguageEntry("type-script"), "hyphen is invalid");
+  assert(!isValidLanguageEntry("123abc"), "starts with digit is invalid");
+});
+
+// ---------------------------------------------------------------------------
+// Blocking fix 1: patchLanguages inline-at-EOF produces trailing newline
+// ---------------------------------------------------------------------------
+
+test("patchLanguages: inline languages: [] at EOF (no trailing newline) → round-trips cleanly via readLanguages", () => {
+  // File ends with `languages: []` — no trailing newline at all.
+  const ymlPath = makeTempProject(`project_name: "test"\nlanguages: []`);
+  patchLanguages(ymlPath, ["python"]);
+  const content = readRaw(ymlPath);
+  // The block must be present (newBlock ends with \n, so file gains one trailing newline).
+  assert(content.includes("languages:\n- python"), "block written when inline [] at EOF");
+  // readLanguages must round-trip correctly — no empty array due to missing newline.
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python"], "readLanguages round-trips after inline-at-EOF patch");
+});
+
+// ---------------------------------------------------------------------------
+// Blocking fix 2: readLanguages strips surrounding quotes from both paths
+// ---------------------------------------------------------------------------
+
+test("readLanguages: inline-quoted — languages: [\"python\"] returns [\"python\"] (unquoted)", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: ["python"]\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python"], "double-quoted inline entry stripped");
+  assert(isValidLanguageEntry(result[0]), "stripped value passes isValidLanguageEntry");
+});
+
+test("readLanguages: inline-quoted multiple — languages: [\"python\", \"typescript\"] returns bare identifiers", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages: ["python", "typescript"]\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python", "typescript"], "double-quoted inline entries stripped");
+});
+
+test("readLanguages: block-quoted — - \"python\" returns [\"python\"] (unquoted)", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- "python"\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python"], "double-quoted block entry stripped");
+  assert(isValidLanguageEntry(result[0]), "stripped value passes isValidLanguageEntry");
+});
+
+test("readLanguages: block single-quoted — - 'python' returns [\"python\"] (unquoted)", () => {
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- 'python'\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python"], "single-quoted block entry stripped");
+  assert(isValidLanguageEntry(result[0]), "stripped value passes isValidLanguageEntry");
+});
+
+test("readLanguages: quoted invalid scalar — - \"markdown []\" strips quotes but still fails isValidLanguageEntry", () => {
+  // After stripping quotes: "markdown []" → markdown [] which contains a space.
+  // isValidLanguageEntry must still reject it.
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- "markdown []"\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  // The scalar after quote-stripping is "markdown []" — still invalid.
+  assert(!isValidLanguageEntry(result[0]), "quoted invalid scalar still rejected by isValidLanguageEntry");
+});
+
+// ---------------------------------------------------------------------------
+// Full heal path: inline [] + docs-only repo
+// ---------------------------------------------------------------------------
+
+test("heal path: inline empty languages: [] in docs-only repo gets detected language written", () => {
+  // Create a minimal temp project with inline empty languages and a .md file
+  // so detectLanguages finds markdown.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-hook-heal-"));
+  const serenaDir = path.join(tmpDir, ".serena");
+  fs.mkdirSync(serenaDir);
+  const ymlPath = path.join(serenaDir, "project.yml");
+  fs.writeFileSync(ymlPath, `project_name: "test"\nlanguages: []\n`, "utf8");
+  // Place a markdown file at repo root so detectLanguages detects markdown.
+  fs.writeFileSync(path.join(tmpDir, "README.md"), "# Test\n", "utf8");
+
+  // readLanguages returns [] (inline empty) → patchLanguages with detected ["markdown"].
+  const existing = readLanguages(ymlPath);
+  assertEqual(existing, [], "inline empty parsed as []");
+
+  // Simulate the main() auto-detect branch.
+  // Since existing.length === 0, detectLanguages would be called. We call
+  // patchLanguages directly with the expected result to test the full chain.
+  patchLanguages(ymlPath, ["markdown"]);
+
+  const content = readRaw(ymlPath);
+  assert(content.includes("languages:\n- markdown\n"), "markdown block written");
+  assert(!content.includes("languages: []"), "no inline [] residue");
+
+  // YAML re-parse must be clean.
+  const cleaned = readLanguages(ymlPath);
+  assertEqual(cleaned, ["markdown"], "re-parse clean");
+  assert(cleaned._corrupted !== true, "no corruption flag");
+});
+
+// ---------------------------------------------------------------------------
+// Inline comment fixes (blocking review findings)
+// ---------------------------------------------------------------------------
+
+test("readLanguages: block entry with inline comment — python  # backend → [\"python\",\"typescript\"], no _corrupted", () => {
+  // Pattern A: `- python  # backend` should yield "python", not "python  # backend".
+  // Both languages must survive; _corrupted must NOT be set.
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- python  # backend\n` +
+    `- typescript\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python", "typescript"], "inline comment stripped, both languages kept");
+  assert(result._corrupted !== true, "_corrupted must NOT be set for inline comment entry");
+  assert(isValidLanguageEntry(result[0]), "python passes isValidLanguageEntry after comment strip");
+  assert(isValidLanguageEntry(result[1]), "typescript passes isValidLanguageEntry");
+});
+
+test("readLanguages: block with indented comment-only line — not corrupted, both languages returned", () => {
+  // Pattern B: `  # a comment` inside a block sequence is valid YAML and must
+  // not set _corrupted or cause a needless rewrite.
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- python\n` +
+    `  # a comment\n` +
+    `- typescript\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python", "typescript"], "both languages returned despite comment line");
+  assert(result._corrupted !== true, "_corrupted must NOT be set for indented comment line");
+});
+
+// ---------------------------------------------------------------------------
+// New tests: column-0 comment between entries (the bug to fix in #16)
+// ---------------------------------------------------------------------------
+
+test("readLanguages: column-0 comment between entries — both languages returned, no _corrupted", () => {
+  // Core bug: a column-0 `# note` between two entries must NOT truncate the
+  // block. Both python and typescript must survive; _corrupted must NOT be set.
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- python\n` +
+    `# note\n` +
+    `- typescript\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python", "typescript"],
+    "both languages returned despite column-0 comment between them");
+  assert(result._corrupted !== true,
+    "_corrupted must NOT be set for a comment-only line between entries");
+});
+
+test("readLanguages: trailing column-0 comment before next key — only entry before comment returned, no _corrupted", () => {
+  // Scenario 1: trailing `# the encoding` comment must stop the block from
+  // being extended into the next key, but must not cause any data loss.
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- python\n` +
+    `# the encoding\n` +
+    `encoding: "utf-8"\n`
+  );
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["python"],
+    "only python returned; # the encoding comment does not split the result");
+  assert(result._corrupted !== true,
+    "_corrupted must NOT be set when trailing comment precedes next key");
+});
+
+test("patchLanguages: trailing '# the encoding' comment + encoding key survive a rewrite", () => {
+  // After patching, the comment and the following key must both still be present.
+  const original =
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- python\n` +
+    `# the encoding\n` +
+    `encoding: "utf-8"\n`;
+  const ymlPath = makeTempProject(original);
+  patchLanguages(ymlPath, ["python", "typescript"]);
+  const content = readRaw(ymlPath);
+  assert(content.includes("languages:\n- python\n- typescript\n"),
+    "new block written correctly");
+  assert(content.includes("# the encoding"),
+    "trailing comment preserved after patch");
+  assert(content.includes('encoding: "utf-8"'),
+    "encoding key preserved after patch");
+});
+
+test("patchLanguages/heal: column-0 comment between entries in corrupted block — all valid languages survive", () => {
+  // A block that is corrupted AND has a column-0 comment between entries.
+  // After heal (dedup + patch), every valid language must appear in the output.
+  const ymlPath = makeTempProject(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- python\n` +
+    `# note\n` +
+    `- typescript\n` +
+    `\n` +
+    `- python\n` +
+    `encoding: "utf-8"\n`
+  );
+
+  // Read should see all entries including the duplicate.
+  const raw = readLanguages(ymlPath);
+  assertEqual(raw, ["python", "typescript", "python"],
+    "readLanguages sees all 3 entries (including duplicate) before heal");
+
+  // Simulate main(): dedup, then patch.
+  const deduped = [...new Set(raw)];
+  patchLanguages(ymlPath, deduped);
+
+  const content = readRaw(ymlPath);
+  assert(content.includes("- python"), "python present after heal");
+  assert(content.includes("- typescript"), "typescript present after heal");
+  assert(!content.match(/- python[\s\S]*?- python/),
+    "no duplicate python entry after heal");
+  assert(content.includes('encoding: "utf-8"'),
+    "encoding key preserved after heal");
+
+  // Re-parse must return exactly the two unique languages.
+  const cleaned = readLanguages(ymlPath);
+  assertEqual(cleaned, ["python", "typescript"],
+    "readLanguages after heal returns exactly the two unique languages");
+  assert(cleaned._corrupted !== true, "no _corrupted flag after heal");
 });
 
 // ---------------------------------------------------------------------------
