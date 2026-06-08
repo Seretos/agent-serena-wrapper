@@ -24,6 +24,9 @@ jobs:
       - name: Validate hook script syntax
         run: node --check scripts/serena-reminder-hook.mjs
 
+      - name: Validate boot wrapper script syntax
+        run: node --check scripts/serena-boot-wrapper.mjs
+
       - name: Test hook script - in-scope repo (expects additionalContext, no warning)
         run: |
           TMPDIR_SCOPE=$(mktemp -d)
