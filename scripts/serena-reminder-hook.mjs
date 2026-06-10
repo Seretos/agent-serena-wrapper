@@ -300,6 +300,68 @@ function isValidLanguageEntry(entry) {
 }
 
 /**
+ * Reads the throttle state from the state file.
+ * Returns `{ counter: 0, session_id: "" }` on any failure (missing file,
+ * corrupt JSON, or invalid shape).
+ *
+ * State schema: `{ counter: number, session_id: string }`.
+ */
+function readState(stateFilePath) {
+  const zero = { counter: 0, session_id: "" };
+  try {
+    const raw = fs.readFileSync(stateFilePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      !Number.isFinite(parsed.counter) ||
+      parsed.counter < 0 ||
+      !Number.isInteger(parsed.counter) ||
+      typeof parsed.session_id !== "string"
+    ) {
+      return zero;
+    }
+    return { counter: parsed.counter, session_id: parsed.session_id };
+  } catch {
+    return zero;
+  }
+}
+
+/**
+ * Writes the throttle state to the state file.
+ * Silently swallows any write error — the hook must never block a tool call.
+ */
+function writeState(stateFilePath, state) {
+  try {
+    fs.writeFileSync(stateFilePath, JSON.stringify(state), "utf8");
+  } catch {
+    // Silently swallow — never block the tool call.
+  }
+}
+
+/**
+ * Pure throttle decision function (no I/O).
+ *
+ * Fires at call positions 1, 1+N, 1+2N … (interval=10 → calls 1, 11, 21).
+ *
+ * - If `sessionId` is non-empty and differs from `state.session_id`, it is a
+ *   new session: fire immediately and reset the counter to 1.
+ * - Otherwise: increment the counter; fire when the previous counter was 0
+ *   (first call) or when the new counter lands on a multiple-of-interval + 1.
+ *
+ * Returns `{ shouldFire, newCounter, newSessionId }`.
+ */
+function computeThrottle(state, sessionId, interval) {
+  const isNewSession = sessionId !== "" && sessionId !== state.session_id;
+  if (isNewSession) {
+    return { shouldFire: true, newCounter: 1, newSessionId: sessionId };
+  }
+  const newCounter = state.counter + 1;
+  const shouldFire = state.counter === 0 || newCounter % interval === 1;
+  return { shouldFire, newCounter, newSessionId: state.session_id };
+}
+
+/**
  * Rewrites the `languages:` block in project.yml using line-based scanning,
  * preserving all comments and other fields. Uses write-to-temp-then-rename
  * for atomicity. Swallows any write error — the hook must never block a call.
@@ -441,50 +503,120 @@ function main() {
   // Determine repo root (parent of .serena/).
   const repoRoot = path.dirname(path.dirname(projectYmlPath));
 
-  // Decide what additionalContext to emit.
-  let additionalContext = REMINDER;
+  // --- Throttle setup ---
+  const stateFilePath = path.join(repoRoot, ".serena", ".reminder-state.json");
 
-  const existingLanguages = readLanguages(projectYmlPath);
+  // Parse SERENA_REMINDER_INTERVAL: use only a positive integer, else fall back to 10.
+  let interval = 10;
+  const envInterval = process.env.SERENA_REMINDER_INTERVAL;
+  if (envInterval !== undefined && envInterval !== "") {
+    const parsed = Number(envInterval);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      interval = parsed;
+    }
+  }
 
-  // Widen the heal condition: trigger a rewrite whenever the block is
-  // corrupted (orphan lines detected by readLanguages), contains duplicates,
-  // or contains invalid scalars (e.g. `markdown []` from Serena folding a
-  // corrupt inline form into the block key).
-  const uniqueLanguages = [...new Set(existingLanguages)];
-  const hasInvalidEntries = uniqueLanguages.some(
-    (e) => !isValidLanguageEntry(e)
+  const incomingSession =
+    typeof input.session_id === "string" ? input.session_id : "";
+
+  const state = readState(stateFilePath);
+  const { shouldFire, newCounter, newSessionId } = computeThrottle(
+    state,
+    incomingSession,
+    interval
   );
-  const isDuplicated = uniqueLanguages.length !== existingLanguages.length;
-  const isCorrupted = existingLanguages._corrupted === true;
+  writeState(stateFilePath, { counter: newCounter, session_id: newSessionId });
 
-  if (existingLanguages.length > 0 && (isDuplicated || isCorrupted || hasInvalidEntries)) {
-    // Heal: strip invalid scalars, keep only valid unique language keys.
-    const cleanLanguages = uniqueLanguages.filter(isValidLanguageEntry);
-    if (cleanLanguages.length > 0) {
-      patchLanguages(projectYmlPath, cleanLanguages);
-      // REMINDER is sufficient — languages are now configured and cleaned.
-    } else {
-      // All entries were invalid — fall back to auto-detection.
+  // --- Decide what additionalContext to emit ---
+  // NO_LANGUAGE_WARNING is always emitted when its error condition holds.
+  // REMINDER and language-healing logic only run when shouldFire is true.
+  let additionalContext = "";
+
+  // Track whether we need to emit the language warning (independent of throttle).
+  let needsLanguageWarning = false;
+
+  if (shouldFire) {
+    const existingLanguages = readLanguages(projectYmlPath);
+
+    // Widen the heal condition: trigger a rewrite whenever the block is
+    // corrupted (orphan lines detected by readLanguages), contains duplicates,
+    // or contains invalid scalars (e.g. `markdown []` from Serena folding a
+    // corrupt inline form into the block key).
+    const uniqueLanguages = [...new Set(existingLanguages)];
+    const hasInvalidEntries = uniqueLanguages.some(
+      (e) => !isValidLanguageEntry(e)
+    );
+    const isDuplicated = uniqueLanguages.length !== existingLanguages.length;
+    const isCorrupted = existingLanguages._corrupted === true;
+
+    if (existingLanguages.length > 0 && (isDuplicated || isCorrupted || hasInvalidEntries)) {
+      // Heal: strip invalid scalars, keep only valid unique language keys.
+      const cleanLanguages = uniqueLanguages.filter(isValidLanguageEntry);
+      if (cleanLanguages.length > 0) {
+        patchLanguages(projectYmlPath, cleanLanguages);
+        // REMINDER is sufficient — languages are now configured and cleaned.
+      } else {
+        // All entries were invalid — fall back to auto-detection.
+        const detected = detectLanguages(repoRoot);
+        if (detected.length > 0) {
+          patchLanguages(projectYmlPath, detected);
+          // REMINDER is sufficient — languages are now configured.
+        } else {
+          needsLanguageWarning = true;
+        }
+      }
+    } else if (existingLanguages.length === 0) {
+      // Languages not yet configured — attempt auto-detection.
       const detected = detectLanguages(repoRoot);
       if (detected.length > 0) {
         patchLanguages(projectYmlPath, detected);
         // REMINDER is sufficient — languages are now configured.
       } else {
-        additionalContext = REMINDER + NO_LANGUAGE_WARNING;
+        // Nothing detectable — surface a targeted warning.
+        needsLanguageWarning = true;
       }
     }
-  } else if (existingLanguages.length === 0) {
-    // Languages not yet configured — attempt auto-detection.
-    const detected = detectLanguages(repoRoot);
-    if (detected.length > 0) {
-      patchLanguages(projectYmlPath, detected);
-      // REMINDER is sufficient — languages are now configured.
-    } else {
-      // Nothing detectable — surface a targeted warning.
-      additionalContext = REMINDER + NO_LANGUAGE_WARNING;
+    // If existingLanguages.length > 0 and no corruption/duplicates/invalid — fast path: emit normal REMINDER only.
+
+    additionalContext = REMINDER;
+    if (needsLanguageWarning) {
+      additionalContext += NO_LANGUAGE_WARNING;
+    }
+  } else {
+    // Throttled: do not emit REMINDER or heal, but still check whether
+    // NO_LANGUAGE_WARNING is warranted.
+    const existingLanguages = readLanguages(projectYmlPath);
+    const uniqueLanguages = [...new Set(existingLanguages)];
+    const hasInvalidEntries = uniqueLanguages.some(
+      (e) => !isValidLanguageEntry(e)
+    );
+    const isDuplicated = uniqueLanguages.length !== existingLanguages.length;
+    const isCorrupted = existingLanguages._corrupted === true;
+
+    if (existingLanguages.length > 0 && (isDuplicated || isCorrupted || hasInvalidEntries)) {
+      // Corrupted/invalid entries — check if any valid language remains.
+      const cleanLanguages = uniqueLanguages.filter(isValidLanguageEntry);
+      if (cleanLanguages.length === 0) {
+        // All entries invalid — would need detection; warn if detection also fails.
+        const detected = detectLanguages(repoRoot);
+        if (detected.length === 0) {
+          needsLanguageWarning = true;
+        }
+      }
+      // If cleanLanguages.length > 0, languages are configured (just dirty) — no warning.
+    } else if (existingLanguages.length === 0) {
+      // No languages at all — warn if detection would also fail.
+      const detected = detectLanguages(repoRoot);
+      if (detected.length === 0) {
+        needsLanguageWarning = true;
+      }
+    }
+    // existingLanguages.length > 0 with no corruption — languages configured, no warning.
+
+    if (needsLanguageWarning) {
+      additionalContext = NO_LANGUAGE_WARNING;
     }
   }
-  // If existingLanguages.length > 0 and no corruption/duplicates/invalid — fast path: emit normal REMINDER only.
 
   // Emit the PreToolUse hook output — non-blocking allow + reminder context.
   const output = {
@@ -501,7 +633,7 @@ function main() {
 
 // Export internal functions for testing. Guard main() so importing this module
 // as an ES module does not run the hook.
-export { readLanguages, patchLanguages, detectLanguages, sortLanguages, isValidLanguageEntry };
+export { readLanguages, patchLanguages, detectLanguages, sortLanguages, isValidLanguageEntry, readState, writeState, computeThrottle };
 
 // Only run main() when this file is executed directly (not imported).
 const isMain =

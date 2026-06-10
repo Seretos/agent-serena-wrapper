@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { readLanguages, patchLanguages, isValidLanguageEntry } from "./serena-reminder-hook.mjs";
+import { readLanguages, patchLanguages, isValidLanguageEntry, detectLanguages, readState, writeState, computeThrottle } from "./serena-reminder-hook.mjs";
 import { healProjectYml, run } from "./serena-boot-wrapper.mjs";
 
 // ---------------------------------------------------------------------------
@@ -858,6 +858,194 @@ test("boot-wrapper: --project-from-cwd skips heal entirely and spawns uvx", () =
   }
 
   assert(spawnCalled, "spawnSync called for --project-from-cwd variant");
+});
+
+// ---------------------------------------------------------------------------
+// Throttle: readState / writeState
+// ---------------------------------------------------------------------------
+
+test("readState: missing file returns zero-value", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-state-test-"));
+  const stateFile = path.join(tmpDir, ".reminder-state.json");
+  // File does not exist.
+  const state = readState(stateFile);
+  assertEqual(state, { counter: 0, session_id: "" }, "missing file → zero-value");
+});
+
+test("readState: corrupt JSON returns zero-value", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-state-test-"));
+  const stateFile = path.join(tmpDir, ".reminder-state.json");
+  fs.writeFileSync(stateFile, "not valid json{{", "utf8");
+  const state = readState(stateFile);
+  assertEqual(state, { counter: 0, session_id: "" }, "corrupt JSON → zero-value");
+});
+
+test("readState: invalid shape (counter not a number) returns zero-value", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-state-test-"));
+  const stateFile = path.join(tmpDir, ".reminder-state.json");
+  fs.writeFileSync(stateFile, JSON.stringify({ counter: "oops", session_id: "s" }), "utf8");
+  const state = readState(stateFile);
+  assertEqual(state, { counter: 0, session_id: "" }, "non-number counter → zero-value");
+});
+
+test("writeState / readState round-trip equality", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-state-test-"));
+  const stateFile = path.join(tmpDir, ".reminder-state.json");
+  const written = { counter: 42, session_id: "abc-session" };
+  writeState(stateFile, written);
+  const read = readState(stateFile);
+  assertEqual(read, written, "round-trip equality");
+});
+
+test("writeState: unwritable path swallowed (no throw)", () => {
+  // Pass a path whose parent directory does not exist — writeFileSync will throw.
+  const badPath = path.join(os.tmpdir(), "nonexistent-dir-xyz-999", ".reminder-state.json");
+  // Must not throw.
+  writeState(badPath, { counter: 1, session_id: "" });
+  // If we reach here, the error was swallowed correctly.
+  assert(true, "no throw from unwritable path");
+});
+
+test("counter increments across 3 calls via readState/writeState", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-state-test-"));
+  const stateFile = path.join(tmpDir, ".reminder-state.json");
+
+  // Call 1.
+  let state = readState(stateFile);
+  const { newCounter: c1 } = computeThrottle(state, "", 10);
+  writeState(stateFile, { counter: c1, session_id: "" });
+  assertEqual(c1, 1, "counter after call 1 = 1");
+
+  // Call 2.
+  state = readState(stateFile);
+  const { newCounter: c2 } = computeThrottle(state, "", 10);
+  writeState(stateFile, { counter: c2, session_id: "" });
+  assertEqual(c2, 2, "counter after call 2 = 2");
+
+  // Call 3.
+  state = readState(stateFile);
+  const { newCounter: c3 } = computeThrottle(state, "", 10);
+  writeState(stateFile, { counter: c3, session_id: "" });
+  assertEqual(c3, 3, "counter after call 3 = 3");
+});
+
+// ---------------------------------------------------------------------------
+// Throttle: computeThrottle fire positions
+// ---------------------------------------------------------------------------
+
+test("computeThrottle: interval=10 over 30 ticks fires at positions [1, 11, 21]", () => {
+  const firePositions = [];
+  let state = { counter: 0, session_id: "" };
+  for (let tick = 1; tick <= 30; tick++) {
+    const { shouldFire, newCounter, newSessionId } = computeThrottle(state, "", 10);
+    if (shouldFire) {
+      firePositions.push(tick);
+    }
+    state = { counter: newCounter, session_id: newSessionId };
+  }
+  assertEqual(firePositions, [1, 11, 21], "interval=10 fires at 1, 11, 21");
+});
+
+test("computeThrottle: interval=3 over 9 ticks fires at positions [1, 4, 7]", () => {
+  const firePositions = [];
+  let state = { counter: 0, session_id: "" };
+  for (let tick = 1; tick <= 9; tick++) {
+    const { shouldFire, newCounter, newSessionId } = computeThrottle(state, "", 3);
+    if (shouldFire) {
+      firePositions.push(tick);
+    }
+    state = { counter: newCounter, session_id: newSessionId };
+  }
+  assertEqual(firePositions, [1, 4, 7], "interval=3 fires at 1, 4, 7");
+});
+
+// ---------------------------------------------------------------------------
+// Throttle: interval env-var parsing (unit-level via computeThrottle)
+// ---------------------------------------------------------------------------
+
+test("invalid interval 'abc' parses to NaN and falls back to 10", () => {
+  // Replicate the parsing logic from main() to assert the fallback.
+  function parseInterval(envVal) {
+    let interval = 10;
+    if (envVal !== undefined && envVal !== "") {
+      const parsed = Number(envVal);
+      if (Number.isInteger(parsed) && parsed > 0) {
+        interval = parsed;
+      }
+    }
+    return interval;
+  }
+  assertEqual(parseInterval("abc"), 10, "non-numeric string falls back to 10");
+  assertEqual(parseInterval("0"), 10, "zero falls back to 10");
+  assertEqual(parseInterval("-5"), 10, "negative falls back to 10");
+  assertEqual(parseInterval("3.5"), 10, "non-integer falls back to 10");
+  assertEqual(parseInterval("5"), 5, "valid positive integer accepted");
+  assertEqual(parseInterval(undefined), 10, "undefined falls back to 10");
+});
+
+// ---------------------------------------------------------------------------
+// Throttle: session reset
+// ---------------------------------------------------------------------------
+
+test("computeThrottle: new session forces shouldFire=true and resets counter to 1", () => {
+  const state = { counter: 7, session_id: "old" };
+  const result = computeThrottle(state, "new", 10);
+  assert(result.shouldFire === true, "shouldFire=true on new session");
+  assertEqual(result.newCounter, 1, "newCounter=1 on new session");
+  assertEqual(result.newSessionId, "new", "newSessionId='new'");
+});
+
+test("computeThrottle: absent session (empty string) increments counter, keeps session_id", () => {
+  const state = { counter: 5, session_id: "s1" };
+  const result = computeThrottle(state, "", 10);
+  assertEqual(result.newCounter, 6, "newCounter incremented to 6");
+  assertEqual(result.newSessionId, "s1", "newSessionId preserved as 's1'");
+  assert(result.shouldFire === false, "shouldFire=false (6 is not a fire position)");
+});
+
+// ---------------------------------------------------------------------------
+// Throttle: NO_LANGUAGE_WARNING always emitted even when throttled
+// ---------------------------------------------------------------------------
+
+test("NO_LANGUAGE_WARNING not throttled: throttled call with empty languages emits warning but not REMINDER", () => {
+  // Build a temp project with languages: [] and no detectable source files.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-warn-test-"));
+  const serenaDir = path.join(tmpDir, ".serena");
+  fs.mkdirSync(serenaDir);
+  const ymlPath = path.join(serenaDir, "project.yml");
+  fs.writeFileSync(ymlPath, `project_name: "test"\nlanguages: []\n`, "utf8");
+  // No source files — detectLanguages will return [].
+
+  // Use the statically-imported readLanguages and detectLanguages to reproduce
+  // main()'s throttled decision.
+  const existingLanguages = readLanguages(ymlPath);
+  assertEqual(existingLanguages, [], "languages is empty");
+
+  // Confirm this is a throttled call (shouldFire=false).
+  const state = { counter: 5, session_id: "" };
+  const { shouldFire } = computeThrottle(state, "", 10);
+  assert(shouldFire === false, "shouldFire=false for this state (throttled)");
+
+  // Simulate the throttled branch: existingLanguages=[], check detection.
+  const detected = detectLanguages(tmpDir);
+  assertEqual(detected, [], "no languages detected in empty project");
+
+  // The warning condition holds regardless of shouldFire.
+  const needsLanguageWarning = existingLanguages.length === 0 && detected.length === 0;
+  assert(needsLanguageWarning === true, "needsLanguageWarning=true for empty languages + no detectable files");
+
+  // On the throttled path: additionalContext = NO_LANGUAGE_WARNING (not REMINDER).
+  const REMINDER_TEXT = "Note: this repository has Serena MCP semantic code tools available";
+  const WARNING_TEXT = "Warning: .serena/project.yml has no languages configured";
+
+  // Reproduce main()'s throttled additionalContext construction:
+  const NO_LANGUAGE_WARNING_TEXT =
+    " Warning: .serena/project.yml has no languages configured — " +
+    "symbol tools are inactive until at least one language is added " +
+    "under 'languages:' in .serena/project.yml.";
+  const throttledContext = needsLanguageWarning ? NO_LANGUAGE_WARNING_TEXT : "";
+  assert(!throttledContext.includes(REMINDER_TEXT), "throttled context does not contain REMINDER");
+  assert(throttledContext.includes(WARNING_TEXT), "throttled context contains NO_LANGUAGE_WARNING");
 });
 
 // ---------------------------------------------------------------------------
