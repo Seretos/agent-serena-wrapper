@@ -32,7 +32,7 @@ jobs:
           TMPDIR_SCOPE=$(mktemp -d)
           mkdir -p "$TMPDIR_SCOPE/.serena"
           printf 'project: test\nlanguages:\n- yaml\n' > "$TMPDIR_SCOPE/.serena/project.yml"
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_SCOPE"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-in-scope","cwd":"'"$TMPDIR_SCOPE"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           echo "Hook output: $OUT"
           if ! echo "$OUT" | grep -q "additionalContext"; then
@@ -48,7 +48,7 @@ jobs:
       - name: Test hook script - out-of-scope repo (expects empty stdout)
         run: |
           TMPDIR_NO_SERENA=$(mktemp -d)
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_NO_SERENA"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-out-of-scope","cwd":"'"$TMPDIR_NO_SERENA"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           if [ -n "$OUT" ]; then
             echo "::error::Expected empty stdout for out-of-scope repo, got: $OUT"
@@ -62,7 +62,7 @@ jobs:
           mkdir -p "$TMPDIR_PATCH/.serena"
           printf 'project: test\nlanguages:\n' > "$TMPDIR_PATCH/.serena/project.yml"
           touch "$TMPDIR_PATCH/index.ts"
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_PATCH"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-empty-languages","cwd":"'"$TMPDIR_PATCH"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           echo "Hook output: $OUT"
           CONTENT=$(cat "$TMPDIR_PATCH/.serena/project.yml")
@@ -80,7 +80,7 @@ jobs:
           # Write `languages:` at end of file with no trailing newline
           printf 'project: test\nlanguages:' > "$TMPDIR_EOF/.serena/project.yml"
           touch "$TMPDIR_EOF/index.ts"
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_EOF"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-eof","cwd":"'"$TMPDIR_EOF"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           echo "Hook output: $OUT"
           CONTENT=$(cat "$TMPDIR_EOF/.serena/project.yml")
@@ -98,7 +98,7 @@ jobs:
           printf 'project: test\nlanguages:\n- python\n' > "$TMPDIR_FAST/.serena/project.yml"
           touch "$TMPDIR_FAST/main.py"
           BEFORE=$(cat "$TMPDIR_FAST/.serena/project.yml")
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_FAST"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-fast-path","cwd":"'"$TMPDIR_FAST"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           AFTER=$(cat "$TMPDIR_FAST/.serena/project.yml")
           if [ "$BEFORE" != "$AFTER" ]; then
@@ -120,7 +120,7 @@ jobs:
           mkdir -p "$TMPDIR_SUBDIR/src"
           printf 'project: test\nlanguages:\n' > "$TMPDIR_SUBDIR/.serena/project.yml"
           touch "$TMPDIR_SUBDIR/src/main.go"
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_SUBDIR"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-subdir","cwd":"'"$TMPDIR_SUBDIR"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           CONTENT=$(cat "$TMPDIR_SUBDIR/.serena/project.yml")
           echo "project.yml after: $CONTENT"
@@ -137,7 +137,7 @@ jobs:
           printf 'project: test\nlanguages:\n' > "$TMPDIR_MULTI/.serena/project.yml"
           touch "$TMPDIR_MULTI/app.ts"
           touch "$TMPDIR_MULTI/data.json"
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_MULTI"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-multi-ext","cwd":"'"$TMPDIR_MULTI"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           CONTENT=$(cat "$TMPDIR_MULTI/.serena/project.yml")
           echo "project.yml after: $CONTENT"
@@ -166,7 +166,7 @@ jobs:
           mkdir -p "$TMPDIR_EMPTY/.serena"
           printf 'project: test\nlanguages:\n' > "$TMPDIR_EMPTY/.serena/project.yml"
           BEFORE=$(cat "$TMPDIR_EMPTY/.serena/project.yml")
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_EMPTY"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-empty-dir","cwd":"'"$TMPDIR_EMPTY"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           echo "Hook output: $OUT"
           AFTER=$(cat "$TMPDIR_EMPTY/.serena/project.yml")
@@ -189,7 +189,7 @@ jobs:
           printf 'project: test\nlanguages:\n' > "$TMPDIR_XYZ/.serena/project.yml"
           touch "$TMPDIR_XYZ/data.xyz"
           BEFORE=$(cat "$TMPDIR_XYZ/.serena/project.yml")
-          OUT=$(echo '{"tool_name":"Read","cwd":"'"$TMPDIR_XYZ"'"}' \
+          OUT=$(echo '{"tool_name":"Read","session_id":"ci-unmapped","cwd":"'"$TMPDIR_XYZ"'"}' \
                 | node scripts/serena-reminder-hook.mjs)
           echo "Hook output: $OUT"
           AFTER=$(cat "$TMPDIR_XYZ/.serena/project.yml")

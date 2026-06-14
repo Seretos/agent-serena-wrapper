@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { readLanguages, patchLanguages, isValidLanguageEntry, detectLanguages, readState, writeState, computeThrottle } from "./serena-reminder-hook.mjs";
+import { readLanguages, patchLanguages, isValidLanguageEntry, detectLanguages, readState, writeState, computeThrottle, resolveStateFilePath } from "./serena-reminder-hook.mjs";
 import { healProjectYml, run } from "./serena-boot-wrapper.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1046,6 +1046,67 @@ test("NO_LANGUAGE_WARNING not throttled: throttled call with empty languages emi
   const throttledContext = needsLanguageWarning ? NO_LANGUAGE_WARNING_TEXT : "";
   assert(!throttledContext.includes(REMINDER_TEXT), "throttled context does not contain REMINDER");
   assert(throttledContext.includes(WARNING_TEXT), "throttled context contains NO_LANGUAGE_WARNING");
+});
+
+// ---------------------------------------------------------------------------
+// resolveStateFilePath
+// ---------------------------------------------------------------------------
+
+test("resolveStateFilePath: CLAUDE_PLUGIN_DATA set → path is <CLAUDE_PLUGIN_DATA>/reminder-state/<sessionId>.json", () => {
+  const pluginData = path.join(os.tmpdir(), "test-plugin-data-" + Math.random().toString(36).slice(2));
+  const result = resolveStateFilePath("my-session", { CLAUDE_PLUGIN_DATA: pluginData });
+  const expected = path.join(pluginData, "reminder-state", "my-session.json");
+  assertEqual(result, expected, "path under CLAUDE_PLUGIN_DATA");
+});
+
+test("resolveStateFilePath: CLAUDE_PLUGIN_DATA absent (undefined) → <os.tmpdir()>/agent-serena-wrapper/reminder-state/<sessionId>.json", () => {
+  const result = resolveStateFilePath("my-session", {});
+  const expected = path.join(os.tmpdir(), "agent-serena-wrapper", "reminder-state", "my-session.json");
+  assertEqual(result, expected, "path under os.tmpdir() fallback when env key absent");
+});
+
+test("resolveStateFilePath: CLAUDE_PLUGIN_DATA empty string '' → falls through to tmpdir fallback", () => {
+  const result = resolveStateFilePath("my-session", { CLAUDE_PLUGIN_DATA: "" });
+  const expected = path.join(os.tmpdir(), "agent-serena-wrapper", "reminder-state", "my-session.json");
+  assertEqual(result, expected, "empty CLAUDE_PLUGIN_DATA falls through to tmpdir");
+});
+
+test("resolveStateFilePath: sessionId empty → filename is no-session.json", () => {
+  const pluginData = path.join(os.tmpdir(), "test-plugin-data-" + Math.random().toString(36).slice(2));
+  const result = resolveStateFilePath("", { CLAUDE_PLUGIN_DATA: pluginData });
+  const expected = path.join(pluginData, "reminder-state", "no-session.json");
+  assertEqual(result, expected, "empty sessionId → no-session.json");
+});
+
+test("resolveStateFilePath: two distinct session IDs → two distinct paths (no clobber)", () => {
+  const pluginData = path.join(os.tmpdir(), "test-plugin-data-" + Math.random().toString(36).slice(2));
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  const pathA = resolveStateFilePath("session-A", env);
+  const pathB = resolveStateFilePath("session-B", env);
+  assert(pathA !== pathB, "two distinct session IDs produce distinct paths");
+  assert(pathA.endsWith("session-A.json"), "session-A path ends with session-A.json");
+  assert(pathB.endsWith("session-B.json"), "session-B path ends with session-B.json");
+});
+
+test("resolveStateFilePath + writeState/readState round-trip: mkdirSync runs before writeFileSync", () => {
+  // Use a real temp CLAUDE_PLUGIN_DATA that does NOT pre-exist the reminder-state subdir.
+  const pluginData = fs.mkdtempSync(path.join(os.tmpdir(), "serena-plugin-data-"));
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  const stateFile = resolveStateFilePath("rt-session", env);
+
+  // Confirm the parent directory does not yet exist (writeState must create it).
+  assert(!fs.existsSync(path.dirname(stateFile)), "reminder-state dir does not pre-exist");
+
+  // writeState should create the directory and write the file without throwing.
+  const written = { counter: 7, session_id: "rt-session" };
+  writeState(stateFile, written);
+
+  // readState must be able to read it back.
+  const read = readState(stateFile);
+  assertEqual(read, written, "round-trip: readState returns what writeState wrote");
+
+  // The directory must now exist.
+  assert(fs.existsSync(path.dirname(stateFile)), "reminder-state dir created by writeState");
 });
 
 // ---------------------------------------------------------------------------
