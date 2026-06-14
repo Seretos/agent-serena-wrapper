@@ -19,6 +19,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -300,6 +301,32 @@ function isValidLanguageEntry(entry) {
 }
 
 /**
+ * Resolves the path where the throttle state file should be stored.
+ *
+ * Base dir: `env.CLAUDE_PLUGIN_DATA` when set and non-empty; otherwise
+ * `<os.tmpdir()>/agent-serena-wrapper`.
+ * Subdirectory: `reminder-state/` beneath that base.
+ * Filename: `<sessionId>.json` when `sessionId` is non-empty;
+ * `no-session.json` otherwise.
+ *
+ * Does NOT create any directories — creation is deferred to `writeState`.
+ *
+ * @param {string} sessionId - The current session identifier (may be empty).
+ * @param {object} [env=process.env] - Environment variables (injectable for tests).
+ * @returns {string} Absolute path to the state file.
+ */
+function resolveStateFilePath(sessionId, env = process.env) {
+  const pluginData = env.CLAUDE_PLUGIN_DATA;
+  const baseDir =
+    typeof pluginData === "string" && pluginData !== ""
+      ? pluginData
+      : path.join(os.tmpdir(), "agent-serena-wrapper");
+  const stateDir = path.join(baseDir, "reminder-state");
+  const filename = sessionId !== "" ? `${sessionId}.json` : "no-session.json";
+  return path.join(stateDir, filename);
+}
+
+/**
  * Reads the throttle state from the state file.
  * Returns `{ counter: 0, session_id: "" }` on any failure (missing file,
  * corrupt JSON, or invalid shape).
@@ -329,10 +356,12 @@ function readState(stateFilePath) {
 
 /**
  * Writes the throttle state to the state file.
+ * Creates the parent directory (recursively) if it does not already exist.
  * Silently swallows any write error — the hook must never block a tool call.
  */
 function writeState(stateFilePath, state) {
   try {
+    fs.mkdirSync(path.dirname(stateFilePath), { recursive: true });
     fs.writeFileSync(stateFilePath, JSON.stringify(state), "utf8");
   } catch {
     // Silently swallow — never block the tool call.
@@ -504,7 +533,11 @@ function main() {
   const repoRoot = path.dirname(path.dirname(projectYmlPath));
 
   // --- Throttle setup ---
-  const stateFilePath = path.join(repoRoot, ".serena", ".reminder-state.json");
+  // Resolve session id first so it can be used to key the state file path.
+  const incomingSession =
+    typeof input.session_id === "string" ? input.session_id : "";
+
+  const stateFilePath = resolveStateFilePath(incomingSession, process.env);
 
   // Parse SERENA_REMINDER_INTERVAL: use only a positive integer, else fall back to 10.
   let interval = 10;
@@ -515,9 +548,6 @@ function main() {
       interval = parsed;
     }
   }
-
-  const incomingSession =
-    typeof input.session_id === "string" ? input.session_id : "";
 
   const state = readState(stateFilePath);
   const { shouldFire, newCounter, newSessionId } = computeThrottle(
@@ -633,7 +663,7 @@ function main() {
 
 // Export internal functions for testing. Guard main() so importing this module
 // as an ES module does not run the hook.
-export { readLanguages, patchLanguages, detectLanguages, sortLanguages, isValidLanguageEntry, readState, writeState, computeThrottle };
+export { readLanguages, patchLanguages, detectLanguages, sortLanguages, isValidLanguageEntry, readState, writeState, computeThrottle, resolveStateFilePath };
 
 // Only run main() when this file is executed directly (not imported).
 const isMain =
