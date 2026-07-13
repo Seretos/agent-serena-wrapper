@@ -45,6 +45,30 @@ jobs:
           fi
           echo "In-scope test: PASS"
 
+      - name: Test hook script - never emits permissionDecision (regression, ticket #25)
+        run: |
+          TMPDIR_PERM=$(mktemp -d)
+          mkdir -p "$TMPDIR_PERM/.serena"
+          printf 'project: test\nlanguages:\n- yaml\n' > "$TMPDIR_PERM/.serena/project.yml"
+          EVENT='{"tool_name":"Read","session_id":"ci-permission-decision","cwd":"'"$TMPDIR_PERM"'"}'
+          OUT1=$(echo "$EVENT" | node scripts/serena-reminder-hook.mjs)
+          echo "Call #1 output: $OUT1"
+          if echo "$OUT1" | grep -q "permissionDecision"; then
+            echo "::error::Call #1 output must never contain permissionDecision — the hook must not auto-approve tool calls"
+            exit 1
+          fi
+          OUT2=$(echo "$EVENT" | node scripts/serena-reminder-hook.mjs)
+          echo "Call #2 (throttled) output: $OUT2"
+          if echo "$OUT2" | grep -q "permissionDecision"; then
+            echo "::error::Call #2 output must never contain permissionDecision — the hook must not auto-approve tool calls"
+            exit 1
+          fi
+          if [ -n "$OUT2" ]; then
+            echo "::error::Expected empty stdout for the throttled second call, got: $OUT2"
+            exit 1
+          fi
+          echo "No-permissionDecision regression test: PASS"
+
       - name: Test hook script - out-of-scope repo (expects empty stdout)
         run: |
           TMPDIR_NO_SERENA=$(mktemp -d)

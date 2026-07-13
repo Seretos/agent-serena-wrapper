@@ -648,11 +648,17 @@ function main() {
     }
   }
 
-  // Emit the PreToolUse hook output — non-blocking allow + reminder context.
+  // Emit the PreToolUse hook output. This hook never makes a permission
+  // decision — it only injects context (or, on the throttled path with
+  // nothing to say, emits nothing at all). Claude Code's normal permission
+  // flow for the tool call is left untouched either way.
+  if (additionalContext === "") {
+    process.exit(0);
+  }
+
   const output = {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      permissionDecision: "allow",
       additionalContext,
     },
   };

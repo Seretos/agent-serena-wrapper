@@ -6,3 +6,4 @@ Thumbs.db
 
 # Serena runtime state (memories, project.local.yml) — not part of the plugin
 .serena/
+.process-ticket-result.json

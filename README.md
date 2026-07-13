@@ -62,8 +62,10 @@ the hook script (`scripts/serena-reminder-hook.mjs`) runs automatically.
 **What it does:** It injects an `additionalContext` reminder — not a hard
 block — telling the model that Serena MCP semantic tools (`find_symbol`,
 `get_symbol_body`, `find_references`, etc.) are available and preferred for
-code-understanding tasks. The tool call is always allowed through; only the
-reminder text is injected.
+code-understanding tasks. The hook never makes a permission decision — it
+does not allow, deny, or block the tool call. It only ever injects context
+(or says nothing, on the throttled path), leaving Claude Code's normal
+permission flow for the tool call completely untouched.
 
 **Scoping:** The hook first walks up from the working directory looking for
 `.serena/project.yml`. If the marker is not found, the hook exits silently
