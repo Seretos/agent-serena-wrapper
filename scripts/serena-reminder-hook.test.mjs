@@ -1253,6 +1253,63 @@ test("e2e (#25): empty stdin — empty stdout, exit 0", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Regression (#26): reminder text must reference only real serena-agent
+// 1.5.3 tool names, not the nonexistent get_symbol_body / find_references /
+// search_symbols / activate_project.
+// ---------------------------------------------------------------------------
+
+test("e2e regression (#26): additionalContext excludes nonexistent tool names and includes real ones", () => {
+  const repoDir = makeE2eRepo(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- typescript\n`
+  );
+  const pluginDataDir = makePluginDataDir();
+  const payload = JSON.stringify({
+    cwd: repoDir,
+    session_id: "session-26-" + Math.random().toString(36).slice(2),
+  });
+
+  const stdout = runHookRaw(payload, pluginDataDir);
+  const parsed = JSON.parse(stdout);
+  const additionalContext = parsed.hookSpecificOutput.additionalContext;
+
+  for (const wrongName of ["get_symbol_body", "find_references", "search_symbols", "activate_project"]) {
+    assert(!additionalContext.includes(wrongName),
+      `additionalContext must not contain nonexistent tool name "${wrongName}"`);
+  }
+  assert(additionalContext.includes("find_referencing_symbols"),
+    "additionalContext must mention find_referencing_symbols");
+  assert(additionalContext.includes("find_symbol"),
+    "additionalContext must mention find_symbol");
+});
+
+// ---------------------------------------------------------------------------
+// Doc-lint guard (#26): SKILL.md and README.md must not reference the
+// nonexistent tool names from the pre-fix serena-agent version mismatch.
+// ---------------------------------------------------------------------------
+
+test("doc-lint (#26): SKILL.md does not reference nonexistent tool names", () => {
+  const skillMdPath = fileURLToPath(
+    new URL("../skills/serena-wrapper/SKILL.md", import.meta.url)
+  );
+  const content = fs.readFileSync(skillMdPath, "utf8");
+  for (const wrongName of ["get_symbol_body", "find_references", "search_symbols", "activate_project"]) {
+    assert(!content.includes(wrongName),
+      `SKILL.md must not contain nonexistent tool name "${wrongName}"`);
+  }
+});
+
+test("doc-lint (#26): README.md does not reference nonexistent tool names", () => {
+  const readmePath = fileURLToPath(new URL("../README.md", import.meta.url));
+  const content = fs.readFileSync(readmePath, "utf8");
+  for (const wrongName of ["get_symbol_body", "find_references", "search_symbols", "activate_project"]) {
+    assert(!content.includes(wrongName),
+      `README.md must not contain nonexistent tool name "${wrongName}"`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------
 
