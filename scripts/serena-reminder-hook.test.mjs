@@ -10,6 +10,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { readLanguages, patchLanguages, isValidLanguageEntry, detectLanguages, readState, writeState, computeThrottle, resolveStateFilePath } from "./serena-reminder-hook.mjs";
 import { healProjectYml, run } from "./serena-boot-wrapper.mjs";
 
@@ -1107,6 +1109,204 @@ test("resolveStateFilePath + writeState/readState round-trip: mkdirSync runs bef
 
   // The directory must now exist.
   assert(fs.existsSync(path.dirname(stateFile)), "reminder-state dir created by writeState");
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end: real subprocess, stdin -> stdout (ticket #25)
+//
+// These spawn the actual script as a child process via execFileSync — the
+// exact contract Claude Code invokes the hook under — rather than calling
+// main() in-process (main() is intentionally not exported). Each test gets
+// its own CLAUDE_PLUGIN_DATA temp dir so throttle state never leaks between
+// tests or between the two calls within a single test.
+// ---------------------------------------------------------------------------
+
+const hookPath = fileURLToPath(new URL("./serena-reminder-hook.mjs", import.meta.url));
+
+/**
+ * Spawn the real hook script as a subprocess, feeding `input` on stdin and
+ * isolating throttle state under `pluginDataDir`. Returns raw stdout text.
+ *
+ * `cwd`, when passed, sets the subprocess's actual OS working directory —
+ * needed for inputs that never carry a JSON `cwd` field (malformed/empty
+ * stdin), since main() then falls back to process.cwd(). Without pinning it
+ * explicitly, that fallback would resolve to *this* repo's own worktree
+ * (which is itself Serena-active), making the test's outcome depend on the
+ * accident of where it happens to run rather than on the hook's contract.
+ */
+function runHookRaw(input, pluginDataDir, cwd) {
+  return execFileSync(process.execPath, [hookPath], {
+    input,
+    cwd,
+    env: { ...process.env, CLAUDE_PLUGIN_DATA: pluginDataDir },
+    encoding: "utf8",
+  });
+}
+
+function makeE2eRepo(ymlContent) {
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-hook-e2e-repo-"));
+  const serenaDir = path.join(repoDir, ".serena");
+  fs.mkdirSync(serenaDir);
+  fs.writeFileSync(path.join(serenaDir, "project.yml"), ymlContent, "utf8");
+  return repoDir;
+}
+
+function makePluginDataDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "serena-hook-e2e-plugindata-"));
+}
+
+test("e2e regression (#25): throttled second call with same session_id produces empty stdout, no permissionDecision on either call", () => {
+  const repoDir = makeE2eRepo(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- typescript\n`
+  );
+  const pluginDataDir = makePluginDataDir();
+  const sessionId = "session-regression-25";
+  const payload = JSON.stringify({ cwd: repoDir, session_id: sessionId });
+
+  // Call #1: brand-new session -> throttle fires -> non-empty stdout with REMINDER.
+  const stdout1 = runHookRaw(payload, pluginDataDir);
+  assert(stdout1.trim().length > 0, "call #1 (new session) produces non-empty stdout");
+  const parsed1 = JSON.parse(stdout1);
+  assert(!("permissionDecision" in parsed1.hookSpecificOutput),
+    "call #1 must not contain permissionDecision");
+  assert(parsed1.hookSpecificOutput.additionalContext.length > 0,
+    "call #1 additionalContext non-empty");
+
+  // Call #2: same session_id -> throttled (interval default 10, tick 2 does not
+  // fire) -> languages are configured so no warning either -> additionalContext
+  // stays "" -> hook must emit NOTHING on stdout (not even an empty-context object).
+  const stdout2 = runHookRaw(payload, pluginDataDir);
+  assertEqual(stdout2, "", "call #2 (throttled, same session) produces empty stdout");
+});
+
+test("e2e (#25): firing path — stdout is JSON with exactly hookEventName + additionalContext, no permissionDecision", () => {
+  const repoDir = makeE2eRepo(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- typescript\n`
+  );
+  const pluginDataDir = makePluginDataDir();
+  const payload = JSON.stringify({
+    cwd: repoDir,
+    session_id: "session-fire-" + Math.random().toString(36).slice(2),
+  });
+
+  const stdout = runHookRaw(payload, pluginDataDir);
+  const parsed = JSON.parse(stdout);
+  assertEqual(Object.keys(parsed), ["hookSpecificOutput"], "top-level has only hookSpecificOutput");
+
+  const hso = parsed.hookSpecificOutput;
+  assertEqual(Object.keys(hso).sort(), ["additionalContext", "hookEventName"],
+    "hookSpecificOutput keys are exactly hookEventName + additionalContext");
+  assert(!("permissionDecision" in hso), "permissionDecision must not be present");
+  assertEqual(hso.hookEventName, "PreToolUse", "hookEventName is PreToolUse");
+  assert(hso.additionalContext.length > 0, "additionalContext is non-empty on the firing path");
+});
+
+test("e2e (#25): warning path — empty languages + no detectable sources — additionalContext contains warning, no permissionDecision", () => {
+  const repoDir = makeE2eRepo(`project_name: "test"\nlanguages: []\n`);
+  // No other files placed in repoDir, so detectLanguages(repoDir) finds nothing.
+  const pluginDataDir = makePluginDataDir();
+  const payload = JSON.stringify({
+    cwd: repoDir,
+    session_id: "session-warn-" + Math.random().toString(36).slice(2),
+  });
+
+  const stdout = runHookRaw(payload, pluginDataDir);
+  const parsed = JSON.parse(stdout);
+  const hso = parsed.hookSpecificOutput;
+  assert(!("permissionDecision" in hso), "permissionDecision must not be present");
+  assert(hso.additionalContext.includes("Warning: .serena/project.yml has no languages configured"),
+    "additionalContext contains the no-language warning");
+});
+
+test("e2e (#25): out-of-scope repo (no .serena/project.yml) — empty stdout, exit 0", () => {
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-hook-e2e-oos-"));
+  const pluginDataDir = makePluginDataDir();
+  const payload = JSON.stringify({ cwd: repoDir, session_id: "session-oos" });
+
+  const stdout = runHookRaw(payload, pluginDataDir);
+  assertEqual(stdout, "", "out-of-scope repo produces empty stdout");
+});
+
+test("e2e (#25): malformed stdin — empty stdout, exit 0", () => {
+  // Malformed JSON hits the catch in main() and exits before any cwd lookup,
+  // so no out-of-scope cwd is needed here — but pin one anyway for safety.
+  const outOfScopeCwd = fs.mkdtempSync(path.join(os.tmpdir(), "serena-hook-e2e-oos-cwd-"));
+  const pluginDataDir = makePluginDataDir();
+  const stdout = runHookRaw("{ not valid json", pluginDataDir, outOfScopeCwd);
+  assertEqual(stdout, "", "malformed stdin produces empty stdout");
+});
+
+test("e2e (#25): empty stdin — empty stdout, exit 0", () => {
+  // Empty stdin does NOT hit main()'s catch (raw.trim() is falsy, so
+  // JSON.parse is skipped without throwing) — it falls through to the
+  // normal cwd-based scope check using process.cwd(). Pin the subprocess's
+  // cwd to a fresh out-of-scope temp dir so the scope check reliably misses
+  // regardless of where this test suite itself is checked out.
+  const outOfScopeCwd = fs.mkdtempSync(path.join(os.tmpdir(), "serena-hook-e2e-oos-cwd-"));
+  const pluginDataDir = makePluginDataDir();
+  const stdout = runHookRaw("", pluginDataDir, outOfScopeCwd);
+  assertEqual(stdout, "", "empty stdin produces empty stdout");
+});
+
+// ---------------------------------------------------------------------------
+// Regression (#26): reminder text must reference only real serena-agent
+// 1.5.3 tool names, not the nonexistent get_symbol_body / find_references /
+// search_symbols / activate_project.
+// ---------------------------------------------------------------------------
+
+test("e2e regression (#26): additionalContext excludes nonexistent tool names and includes real ones", () => {
+  const repoDir = makeE2eRepo(
+    `project_name: "test"\n` +
+    `languages:\n` +
+    `- typescript\n`
+  );
+  const pluginDataDir = makePluginDataDir();
+  const payload = JSON.stringify({
+    cwd: repoDir,
+    session_id: "session-26-" + Math.random().toString(36).slice(2),
+  });
+
+  const stdout = runHookRaw(payload, pluginDataDir);
+  const parsed = JSON.parse(stdout);
+  const additionalContext = parsed.hookSpecificOutput.additionalContext;
+
+  for (const wrongName of ["get_symbol_body", "find_references", "search_symbols", "activate_project"]) {
+    assert(!additionalContext.includes(wrongName),
+      `additionalContext must not contain nonexistent tool name "${wrongName}"`);
+  }
+  assert(additionalContext.includes("find_referencing_symbols"),
+    "additionalContext must mention find_referencing_symbols");
+  assert(additionalContext.includes("find_symbol"),
+    "additionalContext must mention find_symbol");
+});
+
+// ---------------------------------------------------------------------------
+// Doc-lint guard (#26): SKILL.md and README.md must not reference the
+// nonexistent tool names from the pre-fix serena-agent version mismatch.
+// ---------------------------------------------------------------------------
+
+test("doc-lint (#26): SKILL.md does not reference nonexistent tool names", () => {
+  const skillMdPath = fileURLToPath(
+    new URL("../skills/serena-wrapper/SKILL.md", import.meta.url)
+  );
+  const content = fs.readFileSync(skillMdPath, "utf8");
+  for (const wrongName of ["get_symbol_body", "find_references", "search_symbols", "activate_project"]) {
+    assert(!content.includes(wrongName),
+      `SKILL.md must not contain nonexistent tool name "${wrongName}"`);
+  }
+});
+
+test("doc-lint (#26): README.md does not reference nonexistent tool names", () => {
+  const readmePath = fileURLToPath(new URL("../README.md", import.meta.url));
+  const content = fs.readFileSync(readmePath, "utf8");
+  for (const wrongName of ["get_symbol_body", "find_references", "search_symbols", "activate_project"]) {
+    assert(!content.includes(wrongName),
+      `README.md must not contain nonexistent tool name "${wrongName}"`);
+  }
 });
 
 // ---------------------------------------------------------------------------

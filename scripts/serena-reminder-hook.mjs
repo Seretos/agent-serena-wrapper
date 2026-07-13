@@ -28,12 +28,13 @@ const MARKER = path.join(".serena", "project.yml");
 
 const REMINDER =
   "Note: this repository has Serena MCP semantic code tools available " +
-  "(find_symbol, get_symbol_body, find_references, find_implementations, " +
-  "search_symbols). For understanding code structure — finding where a " +
-  "symbol is defined, tracing callers/references, reading a single " +
-  "class or method body, navigating inheritance, or performing a " +
-  "project-wide rename — prefer Serena MCP tools over raw Read/Glob/Grep. " +
-  "They are more precise, token-efficient, and already active in this session.";
+  "(find_symbol with include_body, find_referencing_symbols, " +
+  "find_implementations, find_declaration, get_symbols_overview). For " +
+  "understanding code structure — finding where a symbol is defined, " +
+  "tracing callers/references, reading a single class or method body, " +
+  "navigating inheritance, or performing a project-wide rename — prefer " +
+  "Serena MCP tools over raw Read/Glob/Grep. They are more precise, " +
+  "token-efficient, and already active in this session.";
 
 const NO_LANGUAGE_WARNING =
   " Warning: .serena/project.yml has no languages configured — " +
@@ -648,11 +649,17 @@ function main() {
     }
   }
 
-  // Emit the PreToolUse hook output — non-blocking allow + reminder context.
+  // Emit the PreToolUse hook output. This hook never makes a permission
+  // decision — it only injects context (or, on the throttled path with
+  // nothing to say, emits nothing at all). Claude Code's normal permission
+  // flow for the tool call is left untouched either way.
+  if (additionalContext === "") {
+    process.exit(0);
+  }
+
   const output = {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      permissionDecision: "allow",
       additionalContext,
     },
   };
