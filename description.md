@@ -19,6 +19,9 @@ files, the agent works with code through precise semantic operations.
   codebase via language-server-backed edits.
 - **Precise semantic edits** — insert, replace, or delete code at the symbol
   level instead of line-by-line patching.
+- **Project memory store** — list, read, write, edit, rename, and delete
+  durable notes under `.serena/memories/` so findings survive across
+  sessions instead of being re-derived every time.
 - **Monorepo-correct rooting** — the Claude Code plugin roots Serena at
   `CLAUDE_PROJECT_DIR`, so it resolves the exact sub-repo you opened rather than
   the process working directory; the Codex plugin auto-detects from the CWD.
@@ -38,3 +41,4 @@ files, the agent works with code through precise semantic operations.
 - Explore and understand an unfamiliar codebase quickly.
 - Cut token usage on code-understanding tasks by avoiding whole-file reads.
 - Get reliable, structure-aware edits and renames.
+- Carry findings across sessions instead of re-deriving them each time.

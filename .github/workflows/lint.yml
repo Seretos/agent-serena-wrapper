@@ -242,3 +242,35 @@ jobs:
               print("::error::SKILL.md frontmatter missing 'name' or 'description'"); sys.exit(1)
           print("SKILL.md: OK")
           EOF
+
+      - name: Validate memory toolset is documented
+        run: |
+          for t in list_memories read_memory write_memory edit_memory delete_memory rename_memory initial_instructions; do
+            if ! grep -q "$t" skills/serena-wrapper/SKILL.md; then
+              echo "::error::SKILL.md does not document memory tool/prerequisite: $t"
+              exit 1
+            fi
+          done
+          echo "Memory toolset documentation test: PASS"
+
+      - name: Validate release artifacts mention the memory store
+        run: |
+          if ! grep -qi 'memor' README.md; then
+            echo "::error::README.md does not mention the memory store"
+            exit 1
+          fi
+          if ! grep -qi 'memor' description.md; then
+            echo "::error::description.md does not mention the memory store"
+            exit 1
+          fi
+          echo "Release artifact memory mention test: PASS"
+
+      - name: Validate release/skill artifacts are LF-only (no CR bytes)
+        run: |
+          for f in skills/serena-wrapper/SKILL.md README.md description.md .github/workflows/lint.yml; do
+            if grep -qU $'\r' "$f"; then
+              echo "::error::$f contains CR bytes (must be LF-only)"
+              exit 1
+            fi
+          done
+          echo "LF-only artifact test: PASS"
