@@ -251,10 +251,6 @@ jobs:
               exit 1
             fi
           done
-          if grep -qU $'\r' skills/serena-wrapper/SKILL.md; then
-            echo "::error::SKILL.md contains CR bytes (must be LF-only)"
-            exit 1
-          fi
           echo "Memory toolset documentation test: PASS"
 
       - name: Validate release artifacts mention the memory store
@@ -268,3 +264,13 @@ jobs:
             exit 1
           fi
           echo "Release artifact memory mention test: PASS"
+
+      - name: Validate release/skill artifacts are LF-only (no CR bytes)
+        run: |
+          for f in skills/serena-wrapper/SKILL.md README.md description.md .github/workflows/lint.yml; do
+            if grep -qU $'\r' "$f"; then
+              echo "::error::$f contains CR bytes (must be LF-only)"
+              exit 1
+            fi
+          done
+          echo "LF-only artifact test: PASS"
