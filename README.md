@@ -19,13 +19,16 @@ Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
 
 ## What the skill teaches
 
-The skill covers two halves of the bundled Serena MCP surface: symbol-aware
+The skill covers three parts of the bundled Serena MCP surface: symbol-aware
 code navigation (`find_symbol`, `find_referencing_symbols`,
-`find_implementations`, `get_symbols_overview`, `find_declaration`) and the
-per-project memory store (`list_memories`, `read_memory`, `write_memory`,
-`edit_memory`, `delete_memory`, `rename_memory`) for carrying durable
-findings across sessions. See `skills/serena-wrapper/SKILL.md` for the full
-content.
+`find_implementations`, `get_symbols_overview`, `find_declaration`);
+symbol-level editing and verification (`rename_symbol`,
+`replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`,
+`safe_delete_symbol`, `replace_content`, `get_diagnostics_for_file`), where
+`replace_content` is Claude-Code-only; and the per-project memory store
+(`list_memories`, `read_memory`, `write_memory`, `edit_memory`,
+`delete_memory`, `rename_memory`) for carrying durable findings across
+sessions. See `skills/serena-wrapper/SKILL.md` for the full content.
 
 ## Troubleshooting
 
