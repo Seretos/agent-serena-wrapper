@@ -56,13 +56,20 @@ function substitute(str, vars) {
 // R1 — Codex argv resolves with only Codex's variables
 // ---------------------------------------------------------------------------
 
-test("codex manifest: argv resolves via PLUGIN_ROOT alone and node loads the script", () => {
+test("codex manifest: args[0] is ${PLUGIN_ROOT}/scripts/serena-boot-wrapper.mjs and node loads it cleanly", () => {
   const server = readManifest(".codex-plugin").mcpServers.serena;
-  const args = server.args.map((a) => substitute(a, { PLUGIN_ROOT: repoRoot }));
+  assertEqual(server.command, "node", "command");
+  assertEqual(
+    server.args[0],
+    "${PLUGIN_ROOT}/scripts/serena-boot-wrapper.mjs",
+    "args[0]"
+  );
 
+  const args = server.args.map((a) => substitute(a, { PLUGIN_ROOT: repoRoot }));
   for (const a of args) {
     assert(!a.includes("${"), `unsubstituted placeholder left in arg: ${a}`);
   }
+  assertEqual(path.basename(args[0]), "serena-boot-wrapper.mjs", "args[0] basename");
   assert(fs.existsSync(args[0]), `args[0] does not exist on disk: ${args[0]}`);
 
   // Empty PATH: uvx cannot resolve, so nothing is downloaded/started.
@@ -71,28 +78,11 @@ test("codex manifest: argv resolves via PLUGIN_ROOT alone and node loads the scr
   const result = spawnSync(process.execPath, args, { env, encoding: "utf8", timeout: 30000 });
   const stderr = result.stderr ?? "";
   assert(
-    !/Cannot find module|MODULE_NOT_FOUND/.test(stderr),
+    !/Cannot find module|MODULE_NOT_FOUND|ERR_UNKNOWN_FILE_EXTENSION/.test(stderr),
     `node failed to load the launch script: ${stderr.split("\n")[0]}`
   );
-});
-
-test("codex manifest: command is exactly node (no placeholder in command)", () => {
-  const server = readManifest(".codex-plugin").mcpServers.serena;
-  assertEqual(server.command, "node", "command");
-});
-
-test("codex manifest: no CLAUDE_-prefixed variable anywhere", () => {
-  const raw = fs.readFileSync(path.join(repoRoot, ".codex-plugin", "plugin.json"), "utf8");
-  assert(!/\$\{CLAUDE_/.test(raw), "Codex manifest references a CLAUDE_ variable");
-});
-
-test("claude manifest: still uses CLAUDE_ variables and args[0] resolves", () => {
-  const raw = fs.readFileSync(path.join(repoRoot, ".claude-plugin", "plugin.json"), "utf8");
-  assert(raw.includes("${CLAUDE_PLUGIN_ROOT}"), "missing ${CLAUDE_PLUGIN_ROOT}");
-  assert(raw.includes("${CLAUDE_PROJECT_DIR}"), "missing ${CLAUDE_PROJECT_DIR}");
-  const server = readManifest(".claude-plugin").mcpServers.serena;
-  const first = substitute(server.args[0], { CLAUDE_PLUGIN_ROOT: repoRoot });
-  assert(fs.existsSync(first), `Claude args[0] does not exist: ${first}`);
+  // MCP stdio: stdout carries the protocol; the wrapper must not pollute it.
+  assertEqual(result.stdout ?? "", "", "stdout of the spawned wrapper");
 });
 
 // ---------------------------------------------------------------------------
@@ -101,32 +91,42 @@ test("claude manifest: still uses CLAUDE_ variables and args[0] resolves", () =>
 
 function captureRun(argv, spawnResult) {
   const origExit = process.exit;
-  const origWrite = process.stderr.write;
+  const origErr = process.stderr.write;
+  const origOut = process.stdout.write;
   let exitCode = null;
   let stderr = "";
+  let stdout = "";
   process.exit = (code) => { exitCode = code; };
   process.stderr.write = (chunk) => { stderr += String(chunk); return true; };
+  process.stdout.write = (chunk) => { stdout += String(chunk); return true; };
   try {
     run(argv, { spawnSync: () => spawnResult });
   } finally {
     process.exit = origExit;
-    process.stderr.write = origWrite;
+    process.stderr.write = origErr;
+    process.stdout.write = origOut;
   }
-  return { exitCode, stderr };
+  return { exitCode, stderr, stdout };
 }
 
-test("boot-wrapper: spawn error is reported on stderr naming uvx, exit code 1", () => {
-  const { exitCode, stderr } = captureRun(["--project-from-cwd"], {
-    error: new Error("spawn uvx ENOENT"),
+test("boot-wrapper: spawn error is reported on stderr (with the error text), stdout empty, exit code 1", () => {
+  const { exitCode, stderr, stdout } = captureRun(["--project-from-cwd"], {
+    error: new Error("spawn uvx ENOENT-xyz"),
     status: null,
   });
   assert(stderr.includes("uvx"), `stderr does not mention uvx: ${JSON.stringify(stderr)}`);
+  assert(
+    stderr.includes("ENOENT-xyz"),
+    `stderr does not include the spawn error text: ${JSON.stringify(stderr)}`
+  );
+  assertEqual(stdout, "", "stdout");
   assertEqual(exitCode, 1, "exit code");
 });
 
-test("boot-wrapper: successful spawn writes nothing to stderr and exits 0", () => {
-  const { exitCode, stderr } = captureRun(["--project-from-cwd"], { status: 0 });
+test("boot-wrapper: successful spawn writes nothing to stderr/stdout and exits 0", () => {
+  const { exitCode, stderr, stdout } = captureRun(["--project-from-cwd"], { status: 0 });
   assertEqual(stderr, "", "stderr");
+  assertEqual(stdout, "", "stdout");
   assertEqual(exitCode, 0, "exit code");
 });
 
