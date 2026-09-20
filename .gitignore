@@ -8,3 +8,4 @@ Thumbs.db
 .serena/
 .process-ticket-result.json
 .adev/
+__pycache__/

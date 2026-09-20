@@ -299,10 +299,31 @@ jobs:
 
       - name: Validate release/skill artifacts are LF-only (no CR bytes)
         run: |
-          for f in skills/serena-wrapper/SKILL.md README.md description.md .github/workflows/lint.yml; do
+          for f in skills/serena-wrapper/SKILL.md README.md description.md .github/workflows/lint.yml .github/workflows/release.yml .github/scripts/*.sh tests/test_release_scripts.py; do
             if grep -qU $'\r' "$f"; then
               echo "::error::$f contains CR bytes (must be LF-only)"
               exit 1
             fi
           done
           echo "LF-only artifact test: PASS"
+
+  release-scripts:
+    name: release-scripts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: Test release helper scripts (previous-tag resolution, pre-flight, marketplace payload)
+        run: python -m pytest tests/test_release_scripts.py -v
