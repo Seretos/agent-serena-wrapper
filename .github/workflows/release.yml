@@ -3,12 +3,17 @@ name: release
 # Manual release flow:
 #   1. Trigger via Actions tab -> "Run workflow" -> enter version (e.g. 0.0.1)
 #      or via CLI: gh workflow run release.yml -f version=0.0.1
-#   2. Workflow stamps version into plugin.json (in CI only), pushes an orphan
-#      release branch with install-ready files, creates the
-#      agent-serena-wrapper--v{version} tag on that commit, and publishes a
-#      GitHub Release with the zip attached.
-#   3. The workflow then notifies agent-marketplace directly via
-#      MARKETPLACE_DISPATCH_TOKEN.
+#   2. `stamp` (read-only token) validates every precondition -- version
+#      grammar, default branch, tag / src marker state -- before anything is
+#      built, pushed or tagged, so a failed check burns no version.
+#   3. `assemble` (write token) stamps the version into plugin.json (in CI
+#      only), pushes the lightweight source marker src/<TAG> on the main
+#      commit, pushes an orphan release branch with install-ready files,
+#      creates the agent-serena-wrapper--v{version} tag on that commit, and
+#      publishes a GitHub Release (zip attached, notes generated from main
+#      between src/<previous tag> and src/<TAG>).
+#   4. The workflow then notifies agent-marketplace directly via
+#      MARKETPLACE_DISPATCH_TOKEN, forwarding the release notes as `changelog`.
 on:
   workflow_dispatch:
     inputs:
@@ -18,50 +23,97 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  stamp:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.pre.outputs.tag }}
+      plugin_name: ${{ steps.pre.outputs.plugin_name }}
+      description: ${{ steps.pre.outputs.description }}
+      prev_tag: ${{ steps.pre.outputs.prev_tag }}
     steps:
-      - name: Validate version is semver
-        shell: bash
-        run: |
-          V="${{ inputs.version }}"
-          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Version '$V' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])."
-            exit 1
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fail if tag already exists
+      - name: Pre-flight (no side effects)
+        id: pre
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
-          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
-          if gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "::error::Tag ${TAG} already exists. Delete it first or pick a new version."
+          DESCRIPTION=$(jq -r '.description' .claude-plugin/plugin.json)
+          TAG="${PLUGIN_NAME}--v${VERSION}"
+
+          # The src/<TAG> marker is pushed at the checked-out commit; that is
+          # only safe (no workflow-file diff against the default branch, which
+          # GITHUB_TOKEN may not push) when we run on the default branch.
+          if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Release must run on the default branch '$DEFAULT_BRANCH' (got '$REF_NAME')."
             exit 1
           fi
+
+          # Exit 2 = malformed version: the semver grammar lives only in
+          # prev-release-tag.sh.
+          rc=0
+          PREV_TAG=$(git tag -l | bash .github/scripts/prev-release-tag.sh "$TAG") || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Version '$VERSION' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE], no leading zeros)."
+            exit 1
+          fi
+
+          REPO="$REPO" TAG="$TAG" PREV_TAG="$PREV_TAG" bash .github/scripts/preflight-tags.sh
+
+          {
+            echo "tag=$TAG"
+            echo "plugin_name=$PLUGIN_NAME"
+            echo "description=$DESCRIPTION"
+            echo "prev_tag=$PREV_TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG (previous release: ${PREV_TAG:-none})"
+
+  assemble:
+    needs: stamp
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.stamp.outputs.tag }}
+      PREV_TAG: ${{ needs.stamp.outputs.prev_tag }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Capture main commit
+        id: main
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Stamp version into plugin manifests (in CI only)
         shell: bash
         run: |
-          V="${{ inputs.version }}"
           # Both plugin manifests (Claude + Codex) get the same version.
           for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json; do
             tmp=$(mktemp)
-            jq --arg v "$V" '.version = $v' "$manifest" > "$tmp"
+            jq --arg v "$VERSION" '.version = $v' "$manifest" > "$tmp"
             mv "$tmp" "$manifest"
           done
-          echo "Stamped version $V"
+          echo "Stamped version $VERSION"
 
       - name: Stage install tree and build release zip
         id: stage
@@ -88,11 +140,30 @@ jobs:
           [ -d scripts ] && cp -a scripts "$STAGE/" || true
 
           mkdir -p dist
-          ZIPNAME="agent-serena-wrapper-${{ inputs.version }}.zip"
+          ZIPNAME="agent-serena-wrapper-${VERSION}.zip"
           (cd "$STAGE" && zip -r "$GITHUB_WORKSPACE/dist/$ZIPNAME" .)
+
+          # The orphan checkout below wipes the worktree (including
+          # .github/scripts/), and the dispatch step still needs the helper
+          # scripts: keep a copy outside the worktree.
+          mkdir -p "$RUNNER_TEMP/release-scripts"
+          cp -a .github/scripts/. "$RUNNER_TEMP/release-scripts/"
 
           echo "stage=$STAGE"      >> "$GITHUB_OUTPUT"
           echo "zip=dist/$ZIPNAME" >> "$GITHUB_OUTPUT"
+
+      # Lightweight marker on the *main* commit. It is pushed unconditionally
+      # (pre-flight proved src/<TAG> is absent) and before the orphan push /
+      # tag / release, so a rejected push burns no version. It points at the
+      # checked-out default-branch tip, so its .github/workflows/ tree equals
+      # the default branch's and GITHUB_TOKEN may create it.
+      - name: Push source marker src/<TAG>
+        shell: bash
+        env:
+          MAIN_SHA: ${{ steps.main.outputs.sha }}
+        run: |
+          git tag "src/${TAG}" "$MAIN_SHA"
+          git push origin "refs/tags/src/${TAG}"
 
       - name: Push orphan release branch and capture commit
         id: rel
@@ -113,7 +184,7 @@ jobs:
           # "git checkout --orphan" + clean will wipe dist/ before we attach
           # the zip to the GitHub Release.
           TMP=$(mktemp -d)
-                    # .gitattributes MUST ship on the orphan release branch: Claude Code clones it,
+          # .gitattributes MUST ship on the orphan release branch: Claude Code clones it,
           # and on a Windows machine with core.autocrlf=true (Git-for-Windows default)
           # a checkout without `* text=auto eol=lf` writes CRLF into the plugin cache —
           # and Claude Code silently ignores CRLF skills/agents. (Rebuild incident 2026-08-23.)
@@ -143,26 +214,49 @@ jobs:
           find . -mindepth 1 -not -path './.git*' | sort
 
           git add -A
-          git commit -m "release: v${{ inputs.version }}"
+          git commit -m "release: v${VERSION}"
           git push origin release --force
 
           SHA=$(git rev-parse HEAD)
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
+      # Why the notes are generated explicitly instead of `gh release create
+      # --generate-notes` / `--notes-start-tag`: the release tag sits on a
+      # parent-less orphan commit that shares no history with main, so GitHub
+      # can neither find a previous release to diff against nor list the PRs
+      # merged on main -- the notes come out as one bot commit. The src/<TAG>
+      # markers are the two endpoints on main's history that GitHub can
+      # compare. The body is written outside the worktree (RUNNER_TEMP).
+      - name: Generate release notes from main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          MAIN_SHA: ${{ steps.main.outputs.sha }}
+        run: |
+          ARGS=(-f "tag_name=src/${TAG}" -f "target_commitish=${MAIN_SHA}")
+          if [ -n "$PREV_TAG" ]; then
+            ARGS+=(-f "previous_tag_name=src/${PREV_TAG}")
+          fi
+          gh api "repos/${REPO}/releases/generate-notes" "${ARGS[@]}" --jq .body > "$RUNNER_TEMP/notes.md"
+
       - name: Create tag and GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ORPHAN_SHA: ${{ steps.rel.outputs.sha }}
+          ASSET: ${{ steps.rel.outputs.asset }}
         run: |
-          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
-          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          FLAGS=()
+          if [[ "$VERSION" == *-* ]]; then FLAGS+=(--prerelease); fi
           gh release create "$TAG" \
-            --repo "${{ github.repository }}" \
-            --target "${{ steps.rel.outputs.sha }}" \
+            --repo "$REPO" \
+            --target "$ORPHAN_SHA" \
             --title "$TAG" \
-            --generate-notes \
-            ${{ contains(inputs.version, '-') && '--prerelease' || '' }} \
-            "${{ steps.rel.outputs.asset }}"
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "${FLAGS[@]}" \
+            "$ASSET"
 
       # Tags created via GITHUB_TOKEN don't fire downstream push:tags workflows
       # (Actions blocks this to prevent recursive loops). Call the marketplace
@@ -170,29 +264,15 @@ jobs:
       - name: Dispatch to agent-marketplace
         shell: bash
         env:
-          GH_PAT:  ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PAT: ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
+          REPO: ${{ github.repository }}
+          NAME: ${{ needs.stamp.outputs.plugin_name }}
+          DESCRIPTION: ${{ needs.stamp.outputs.description }}
         run: |
-          DESC=$(jq -r '.description' .claude-plugin/plugin.json)
-          NAME=$(jq -r '.name'        .claude-plugin/plugin.json)
-          TAG="${NAME}--v${VERSION}"
+          bash "$RUNNER_TEMP/release-scripts/marketplace-payload.sh" > "$RUNNER_TEMP/payload.json"
           curl -fsSL -X POST \
             -H "Authorization: Bearer $GH_PAT" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/Seretos/agent-marketplace/dispatches \
-            -d @- <<EOF
-          {
-            "event_type": "plugin-release",
-            "client_payload": {
-              "name":        "${NAME}",
-              "description": "${DESC}",
-              "repo":        "${{ github.repository }}",
-              "category":    "skill",
-              "version":     "${VERSION}",
-              "ref":         "${TAG}",
-              "icon":        "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",
-              "description_url": "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/description.md",
-              "tags":        ["coding"]
-            }
-          }
-          EOF
+            -d @"$RUNNER_TEMP/payload.json"

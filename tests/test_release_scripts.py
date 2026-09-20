@@ -115,6 +115,10 @@ if [ -n "${GH_STUB_FAIL:-}" ]; then
 fi
 if [ "$1" = "api" ]; then
   ref="${2#repos/*/git/refs/tags/}"
+  if [ -n "${GH_STUB_FAIL_REF:-}" ] && [ "$ref" = "$GH_STUB_FAIL_REF" ]; then
+    echo "gh: Server Error (HTTP 500)" >&2
+    exit 1
+  fi
   if printf '%s\n' "$GH_STUB_EXISTING" | grep -Fxq -- "$ref"; then
     echo '{"ref":"refs/tags/'"$ref"'"}'
     exit 0
@@ -187,8 +191,12 @@ def assert_read_only(gh_env):
         assert line.startswith("api repos/"), line
 
 
-def test_preflight_passes_when_prev_marker_exists(gh_env):
-    r = preflight(gh_env, [f"src/{PREV}"])
+PREV_VARIANTS = [PREV, v("1.0.0-rc.1")]
+
+
+@pytest.mark.parametrize("prev_tag", PREV_VARIANTS)
+def test_preflight_passes_when_prev_marker_exists(gh_env, prev_tag):
+    r = preflight(gh_env, [f"src/{prev_tag}"], prev_tag=prev_tag)
     assert r.returncode == 0, text(r.stderr) + text(r.stdout)
     assert_read_only(gh_env)
 
@@ -196,22 +204,29 @@ def test_preflight_passes_when_prev_marker_exists(gh_env):
 def test_preflight_fails_when_release_tag_exists(gh_env):
     r = preflight(gh_env, [f"src/{PREV}", TAG])
     assert r.returncode == 1
-    assert TAG in text(r.stdout) + text(r.stderr)
+    out = text(r.stdout) + text(r.stderr)
+    assert f"Tag {TAG} already exists" in out
+    assert "Bootstrap" not in out and "is missing" not in out
 
 
 def test_preflight_fails_when_src_marker_exists(gh_env):
     r = preflight(gh_env, [f"src/{PREV}", f"src/{TAG}"])
     assert r.returncode == 1
-    assert f"src/{TAG}" in text(r.stdout) + text(r.stderr)
+    out = text(r.stdout) + text(r.stderr)
+    assert f"src/{TAG} already exists" in out
+    assert "Bootstrap" not in out and "is missing" not in out
     assert_read_only(gh_env)
 
 
-def test_preflight_missing_prev_marker_prints_bootstrap_commands(gh_env):
-    r = preflight(gh_env, [])
+@pytest.mark.parametrize("prev_tag", PREV_VARIANTS)
+def test_preflight_missing_prev_marker_prints_bootstrap_commands(gh_env, prev_tag):
+    r = preflight(gh_env, [], prev_tag=prev_tag)
     assert r.returncode == 1
     out = text(r.stdout) + text(r.stderr)
-    assert f"git tag src/{PREV} " in out
-    assert f"git push origin src/{PREV}" in out
+    assert f"git tag src/{prev_tag} " in out
+    assert f"git push origin src/{prev_tag}" in out
+    assert f"src/{prev_tag} is missing" in out
+    assert "already exists" not in out
     assert_read_only(gh_env)
 
 
@@ -223,6 +238,17 @@ def test_preflight_first_release_empty_prev_tag_passes(gh_env):
 def test_preflight_gh_failure_is_not_read_as_absent(gh_env):
     r = preflight(gh_env, [f"src/{PREV}"], GH_STUB_FAIL="1")
     assert r.returncode != 0
+
+
+@pytest.mark.parametrize("failing_ref", [TAG, f"src/{TAG}", f"src/{PREV}"])
+def test_preflight_non_404_error_on_any_lookup_fails(gh_env, failing_ref):
+    # A 500 on exactly one lookup must fail the pre-flight, never read as
+    # "absent" (for TAG / src/TAG) nor be papered over.
+    r = preflight(gh_env, [f"src/{PREV}"], GH_STUB_FAIL_REF=failing_ref)
+    assert r.returncode == 1
+    out = text(r.stdout) + text(r.stderr)
+    assert "not a 404" in out
+    assert "Bootstrap" not in out
 
 
 # ---------------------------------------------------------------- R3
@@ -271,6 +297,42 @@ def test_marketplace_payload_changelog_byte_exact_and_nine_fields(gh_env):
     assert cp["ref"] == TAG
     assert cp["icon"] == f"https://raw.githubusercontent.com/{REPO}/{TAG}/assets/icon.png"
     assert cp["description_url"] == f"https://raw.githubusercontent.com/{REPO}/{TAG}/description.md"
+
+
+@pytest.mark.parametrize("body", ["notes\n\n", "notes\n  \n", "notes  ", "\n\nnotes\n"])
+def test_marketplace_payload_only_gh_trailing_newline_stripped(gh_env, body):
+    # gh appends exactly one "\n"; any further trailing whitespace belongs to
+    # the body and must survive (a plain $(...) would eat it).
+    r = payload(gh_env, body)
+    assert r.returncode == 0, text(r.stderr)
+    cp = json.loads(r.stdout.decode("utf-8"))["client_payload"]
+    assert cp["changelog"] == body
+
+
+@pytest.mark.parametrize(
+    "repo,tag,name,version",
+    [
+        ("Acme/other-plugin", "other-plugin--v2.0.0-rc.1", "other-plugin", "2.0.0-rc.1"),
+        ("Seretos/agent-serena-wrapper", v("10.20.30"), PLUGIN, "10.20.30"),
+    ],
+)
+def test_marketplace_payload_fields_follow_env(gh_env, repo, tag, name, version):
+    gh_env["_body"].write_bytes(b"notes")
+    r = run_script(
+        "marketplace-payload.sh",
+        env=env_of(
+            gh_env, REPO=repo, TAG=tag, NAME=name, DESCRIPTION="d", VERSION=version
+        ),
+    )
+    assert r.returncode == 0, text(r.stderr)
+    cp = json.loads(r.stdout.decode("utf-8"))["client_payload"]
+    assert cp["repo"] == repo
+    assert cp["ref"] == tag
+    assert cp["name"] == name
+    assert cp["version"] == version
+    assert cp["icon"] == f"https://raw.githubusercontent.com/{repo}/{tag}/assets/icon.png"
+    assert cp["description_url"] == f"https://raw.githubusercontent.com/{repo}/{tag}/description.md"
+    assert cp["description"] == "d"
 
 
 def test_marketplace_payload_description_with_quote_and_tags_array(gh_env):
