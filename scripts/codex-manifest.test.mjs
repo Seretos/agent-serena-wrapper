@@ -134,5 +134,38 @@ test("boot-wrapper: successful spawn writes nothing to stderr/stdout and exits 0
   assertEqual(exitCode, 0, "exit code");
 });
 
+// ---------------------------------------------------------------------------
+// Edge coverage — manifests and release staging
+// ---------------------------------------------------------------------------
+
+test("codex manifest: no CLAUDE_-prefixed variable anywhere", () => {
+  const raw = fs.readFileSync(path.join(repoRoot, ".codex-plugin", "plugin.json"), "utf8");
+  assert(!/\$\{CLAUDE_/.test(raw), "Codex manifest references a CLAUDE_ variable");
+});
+
+test("claude manifest: still uses CLAUDE_PLUGIN_ROOT / CLAUDE_PROJECT_DIR and args[0] resolves", () => {
+  const server = readManifest(".claude-plugin").mcpServers.serena;
+  assertEqual(server.args[0], "${CLAUDE_PLUGIN_ROOT}/scripts/serena-boot-wrapper.mjs", "args[0]");
+  assert(server.args.includes("${CLAUDE_PROJECT_DIR}"), "CLAUDE_PROJECT_DIR missing");
+  const first = substitute(server.args[0], { CLAUDE_PLUGIN_ROOT: repoRoot });
+  assert(fs.existsSync(first), `args[0] does not exist: ${first}`);
+});
+
+test("release.yml stages the Codex manifest and every plugin-root dir either manifest references", () => {
+  const release = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
+  const refs = new Set();
+  for (const dir of [".claude-plugin", ".codex-plugin"]) {
+    for (const a of readManifest(dir).mcpServers.serena.args) {
+      const m = /^\$\{(?:CLAUDE_)?PLUGIN_ROOT\}\/([^/]+)\//.exec(a);
+      if (m) refs.add(m[1]);
+    }
+  }
+  assert(refs.size > 0, "no plugin-root-relative references found");
+  for (const d of refs) {
+    assert(new RegExp(`cp -a ${d}(/\\.)? `).test(release), `release.yml stage step does not copy ${d}/`);
+  }
+  assert(release.includes("cp .codex-plugin/plugin.json"), "release.yml does not stage the Codex manifest");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

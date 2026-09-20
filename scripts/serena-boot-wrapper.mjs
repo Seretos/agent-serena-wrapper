@@ -114,6 +114,13 @@ export function run(argv, overrides = {}) {
   // If --project-from-cwd or --project absent: skip heal entirely.
 
   const result = spawnFn("uvx", argv, { stdio: "inherit", shell: false });
+  if (result.error) {
+    // Report on stderr (never stdout: that is the MCP channel) so a host's
+    // bare "connection closed" is diagnosable.
+    process.stderr.write(`serena-boot-wrapper: failed to launch uvx: ${result.error.message}\n`);
+    process.exit(1);
+    return;
+  }
   process.exit(result.status ?? 1);
 }
 
