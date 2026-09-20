@@ -69,13 +69,17 @@ test("codex manifest: args[0] is ${PLUGIN_ROOT}/scripts/serena-boot-wrapper.mjs 
   for (const a of args) {
     assert(!a.includes("${"), `unsubstituted placeholder left in arg: ${a}`);
   }
-  assertEqual(path.basename(args[0]), "serena-boot-wrapper.mjs", "args[0] basename");
   assert(fs.existsSync(args[0]), `args[0] does not exist on disk: ${args[0]}`);
 
-  // Empty PATH: uvx cannot resolve, so nothing is downloaded/started.
-  const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-manifest-test-"));
-  const env = { ...process.env, PATH: emptyDir, Path: emptyDir };
-  const result = spawnSync(process.execPath, args, { env, encoding: "utf8", timeout: 30000 });
+  // Launch the manifest's declared command itself (not process.execPath), so a
+  // placeholder or unresolvable command fails the launch. PATH holds only
+  // node's own directory (minus any uvx), so nothing is downloaded/started.
+  const nodeDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-manifest-test-"));
+  const nodeName = path.basename(process.execPath);
+  fs.copyFileSync(process.execPath, path.join(nodeDir, nodeName));
+  const env = { ...process.env, PATH: nodeDir, Path: nodeDir };
+  const result = spawnSync(server.command, args, { env, encoding: "utf8", timeout: 30000 });
+  assert(!result.error, `could not launch declared command ${JSON.stringify(server.command)}: ${result.error?.message}`);
   const stderr = result.stderr ?? "";
   assert(
     !/Cannot find module|MODULE_NOT_FOUND|ERR_UNKNOWN_FILE_EXTENSION/.test(stderr),
