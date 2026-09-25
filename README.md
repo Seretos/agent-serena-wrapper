@@ -13,8 +13,8 @@ Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
 ## Install
 
 ```
-/plugin marketplace add Seretos/agent-marketplace
-/plugin install agent-serena-wrapper@agent-marketplace
+/plugin marketplace add seretos-agents/modular-software-factory
+/plugin install agent-serena-wrapper@modular-software-factory
 ```
 
 ## What the skill teaches

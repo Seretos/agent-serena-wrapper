@@ -18,7 +18,7 @@ SCRIPTS = ROOT / ".github" / "scripts"
 BASH = r"C:\Program Files\Git\bin\bash.exe" if sys.platform == "win32" else "/bin/bash"
 
 PLUGIN = "agent-serena-wrapper"
-REPO = "Seretos/agent-serena-wrapper"
+REPO = "seretos-agents/agent-serena-wrapper"
 
 
 def run_script(name, args=(), stdin="", env=None):
@@ -313,7 +313,7 @@ def test_marketplace_payload_only_gh_trailing_newline_stripped(gh_env, body):
     "repo,tag,name,version",
     [
         ("Acme/other-plugin", "other-plugin--v2.0.0-rc.1", "other-plugin", "2.0.0-rc.1"),
-        ("Seretos/agent-serena-wrapper", v("10.20.30"), PLUGIN, "10.20.30"),
+        ("seretos-agents/agent-serena-wrapper", v("10.20.30"), PLUGIN, "10.20.30"),
     ],
 )
 def test_marketplace_payload_fields_follow_env(gh_env, repo, tag, name, version):
