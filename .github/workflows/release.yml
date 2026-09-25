@@ -271,8 +271,18 @@ jobs:
           DESCRIPTION: ${{ needs.stamp.outputs.description }}
         run: |
           bash "$RUNNER_TEMP/release-scripts/marketplace-payload.sh" > "$RUNNER_TEMP/payload.json"
+
+          # Staging first (lands straight to main, no review), then the
+          # curated marketplace (opens a review PR) -- same payload, two
+          # independent dispatches.
           curl -fsSL -X POST \
             -H "Authorization: Bearer $GH_PAT" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/Seretos/agent-marketplace/dispatches \
+            https://api.github.com/repos/seretos-agents/modular-software-factory-staging/dispatches \
+            -d @"$RUNNER_TEMP/payload.json"
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/seretos-agents/modular-software-factory/dispatches \
             -d @"$RUNNER_TEMP/payload.json"
