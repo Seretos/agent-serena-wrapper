@@ -219,38 +219,56 @@ function runWrapper(args, cwd, stub) {
   return { status: result.status, stderr: result.stderr ?? "", recorded, logExists };
 }
 
-/** Remove the first "--project" flag and its following value from arr. */
-function withoutProjectFlag(arr) {
-  const i = arr.indexOf("--project");
-  if (i === -1) return arr.slice();
-  return [...arr.slice(0, i), ...arr.slice(i + 2)];
-}
-
 function codexManifestArgs() {
   return readManifest(".codex-plugin").mcpServers.serena.args.map((a) =>
     substitute(a, { PLUGIN_ROOT: repoRoot })
   );
 }
 
+/**
+ * Assert that `recorded` is `codexArgs.slice(1)` with the `--project-from-cwd`
+ * token replaced **in place** by `--project <ws>` — not just "a --project
+ * pair exists somewhere and the rest matches once you remove it from
+ * wherever it sits". A wrapper that merely prepended `--project <cwd>` to
+ * the front of argv (leaving `--project-from-cwd` to be stripped separately,
+ * or left elsewhere) would satisfy the weaker check but hand uv/uvx a
+ * differently-ordered argv than intended. So this walks both arrays by
+ * position: every non-project-flag slot must match exactly, and the
+ * `--project`/value pair must land at the exact index `--project-from-cwd`
+ * held.
+ */
 function assertRewrittenToProjectCwd(recorded, codexArgs, ws) {
   assert(
     !recorded.includes("--project-from-cwd"),
     `--project-from-cwd still forwarded: ${JSON.stringify(recorded)}`
   );
-  const projectIdx = recorded.indexOf("--project");
-  assert(projectIdx !== -1, `--project not found in recorded argv: ${JSON.stringify(recorded)}`);
-  assertEqual(
-    fs.realpathSync(recorded[projectIdx + 1]),
-    fs.realpathSync(ws),
-    "--project value"
+  const source = codexArgs.slice(1);
+  const expectedShape = source.flatMap((a) =>
+    a === "--project-from-cwd" ? ["--project", null] : [a]
   );
-  const remaining = withoutProjectFlag(recorded);
-  const expectedRemaining = codexArgs.slice(1).filter((a) => a !== "--project-from-cwd");
   assertEqual(
-    JSON.stringify(remaining),
-    JSON.stringify(expectedRemaining),
-    "remaining forwarded args (codexArgs.slice(1) minus --project-from-cwd)"
+    recorded.length,
+    expectedShape.length,
+    `recorded argv length (recorded: ${JSON.stringify(recorded)}, expected shape: ${JSON.stringify(expectedShape)})`
   );
+  const wsReal = fs.realpathSync(ws);
+  expectedShape.forEach((expected, i) => {
+    if (expected === null) {
+      // The --project value slot: compare via realpath since a mkdtemp path
+      // may resolve through a symlink (e.g. macOS /tmp -> /private/tmp).
+      assertEqual(
+        fs.realpathSync(recorded[i]),
+        wsReal,
+        `--project value at position ${i} (recorded: ${JSON.stringify(recorded)})`
+      );
+    } else {
+      assertEqual(
+        recorded[i],
+        expected,
+        `arg mismatch at position ${i} (recorded: ${JSON.stringify(recorded)})`
+      );
+    }
+  });
 }
 
 const uvxStub = makeUvxStub();
