@@ -837,29 +837,64 @@ test("boot-wrapper: heal error does not prevent uvx spawn — spawnSync still ca
   assertEqual(exitCode, 0, "process.exit called with uvx exit code");
 });
 
-test("boot-wrapper: --project-from-cwd skips heal entirely and spawns uvx", () => {
-  // Arrange: argv has --project-from-cwd instead of --project <dir>.
-  // There is no --project flag so healProjectYml must never be invoked.
-  // If healProjectYml were called with undefined projectDir it would throw,
-  // but run() only calls it when projectIdx !== -1.
+test("boot-wrapper: --project-from-cwd is rewritten to --project <cwd>, so heal now runs against cwd", () => {
+  // Arrange: argv has --project-from-cwd instead of --project <dir>. Per the
+  // #45 fix, run() rewrites --project-from-cwd to --project <process.cwd()>
+  // BEFORE the heal lookup, so healProjectYml IS now invoked (Codex gets the
+  // same heal behaviour Claude already had) — this is the opposite of the
+  // previous "heal is skipped entirely" claim this test used to make.
+  //
+  // The cwd is sandboxed via process.chdir() into a fresh temp directory
+  // (restored in `finally`) so the heal step never touches this repo's own
+  // live .serena/project.yml, matching the isolation pattern the other
+  // boot-wrapper tests use via fs.mkdtempSync.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "serena-boot-wrapper-cwd-test-"));
+  const serenaDir = path.join(tmpDir, ".serena");
+  fs.mkdirSync(serenaDir);
+  const ymlPath = path.join(serenaDir, "project.yml");
+  fs.writeFileSync(
+    ymlPath,
+    `project_name: "test"\nlanguages:\n- typescript\n- toml []\n`,
+    "utf8"
+  );
 
   let spawnCalled = false;
+  let spawnArgs = null;
   const fakeSpawn = (cmd, args, opts) => {
     spawnCalled = true;
+    spawnArgs = args;
     return { status: 0 };
   };
 
   const originalExit = process.exit;
+  const originalCwd = process.cwd();
+  let expectedProjectDir;
   process.exit = () => {};
   try {
+    process.chdir(tmpDir);
+    expectedProjectDir = process.cwd();
     const argv = ["--from", "serena-agent==1.5.3", "serena", "start-mcp-server",
                   "--project-from-cwd", "--context", "codex"];
     run(argv, { spawnSync: fakeSpawn });
   } finally {
+    process.chdir(originalCwd);
     process.exit = originalExit;
   }
 
   assert(spawnCalled, "spawnSync called for --project-from-cwd variant");
+  assert(spawnArgs.includes("--project"),
+    "--project-from-cwd rewritten to --project in forwarded argv");
+  assert(!spawnArgs.includes("--project-from-cwd"),
+    "--project-from-cwd itself is not forwarded to uvx");
+  assertEqual(spawnArgs[spawnArgs.indexOf("--project") + 1], expectedProjectDir,
+    "--project value is the sandboxed temp cwd, not the real repo root");
+
+  // Assert heal actually ran against the temp cwd's project.yml (not skipped):
+  // the corrupted `- toml []` entry must be gone.
+  const result = readLanguages(ymlPath);
+  assertEqual(result, ["typescript"],
+    "heal ran against --project-from-cwd's rewritten cwd: only typescript survives");
+  assert(result._corrupted !== true, "no _corrupted flag after heal");
 });
 
 // ---------------------------------------------------------------------------
